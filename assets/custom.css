@@ -1,0 +1,932 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+:root {
+    --brand-navy: #0f1236;
+    --brand-navy-light: #161843;
+    --brand-navy-lighter: #1e2156;
+    --brand-yellow: #f9a825;
+    --brand-yellow-hover: #fbc02d;
+    
+    --text-primary: #ffffff;
+    --text-secondary: #cbd5e1;
+    --text-tertiary: #64748b;
+    
+    --border-color: rgba(249, 168, 37, 0.2);
+    
+    --header-height: 60px;
+    --radius-sm: 4px;
+    --radius-md: 6px;
+    --radius-lg: 8px;
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    font-family: 'Inter', sans-serif;
+    background-color: var(--brand-navy);
+    color: var(--text-primary);
+    height: 100vh;
+    overflow: hidden;
+}
+
+.app-container {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+}
+
+/* Header */
+.header {
+    height: var(--header-height);
+    background: linear-gradient(135deg, var(--brand-navy) 0%, var(--brand-navy-light) 100%);
+    border-bottom: 2px solid var(--brand-yellow);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0 30px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+    position: relative;
+}
+
+.header-left {
+    display: flex;
+    align-items: center;
+    flex: 0 0 auto;
+}
+
+.header-logo {
+    height: 28px;
+    width: auto;
+}
+
+.header-center {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex: 1;
+}
+
+.header-title {
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: var(--brand-yellow);
+    letter-spacing: 1px;
+    text-align: center;
+}
+
+.header-right {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    flex: 0 0 auto;
+}
+
+/* Refresh Button */
+.refresh-btn {
+    background-color: transparent;
+    color: var(--brand-yellow);
+    border: 2px solid var(--brand-yellow);
+    padding: 6px 16px;
+    border-radius: var(--radius-md);
+    cursor: pointer;
+    font-size: 0.85rem;
+    font-weight: 600;
+    font-family: 'Inter', sans-serif;
+    transition: all 0.2s ease;
+}
+
+.refresh-btn:hover {
+    background-color: var(--brand-yellow);
+    color: var(--brand-navy);
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(249, 168, 37, 0.3);
+}
+
+.last-updated {
+    color: var(--text-secondary);
+    font-size: 0.75rem;
+    font-weight: 500;
+    margin-left: auto;
+}
+
+/* Main Content */
+.main-content {
+    padding: 20px;
+    height: calc(100vh - var(--header-height));
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+}
+
+/* Panels */
+.panel {
+    background-color: var(--brand-navy-light);
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--border-color);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    flex: 1;
+    min-height: 0;
+}
+
+.surveys-panel.full-width {
+    width: 100%;
+    height: 100%;
+}
+
+/* Surveys Header */
+.surveys-header {
+    padding: 12px 20px;
+    padding-left: 30px; /* Align with survey-item left border (surveys-list padding-left is 30px) */
+    border-bottom: 1px solid var(--border-color);
+}
+
+.panel-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin: 0;
+    padding: 0;
+}
+
+.panel-label {
+    font-size: 0.95rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    color: var(--brand-yellow);
+    margin: 0;
+    padding: 0;
+    line-height: 1;
+    display: block;
+}
+
+/* Search container */
+.search-container {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 1;
+    max-width: 350px;
+    margin: 0 20px;
+}
+
+.search-input {
+    flex: 1;
+    padding: 8px 14px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(249, 168, 37, 0.3);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-size: 0.9rem;
+    font-family: 'Inter', sans-serif;
+    font-weight: 400;
+    transition: all 0.2s ease;
+}
+
+.search-input::placeholder {
+    color: var(--text-tertiary);
+}
+
+.search-input:focus {
+    outline: none;
+    border-color: var(--brand-yellow);
+    background: rgba(255, 255, 255, 0.08);
+    box-shadow: 0 0 0 3px rgba(249, 168, 37, 0.15);
+}
+
+.clear-search-btn {
+    padding: 8px 12px;
+    background: transparent;
+    border: 1px solid rgba(249, 168, 37, 0.3);
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+    font-family: 'Inter', sans-serif;
+    font-weight: 400;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.clear-search-btn:hover {
+    border-color: var(--brand-yellow);
+    color: var(--brand-yellow);
+    background: rgba(249, 168, 37, 0.1);
+    letter-spacing: 1.5px;
+}
+
+.count-display {
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    font-weight: 600;
+}
+
+/* Loading Indicator */
+.loading-indicator {
+    margin-top: 10px;
+    padding: 8px 12px;
+    background-color: rgba(249, 168, 37, 0.1);
+    border-left: 3px solid var(--brand-yellow);
+    border-radius: var(--radius-sm);
+    color: var(--brand-yellow);
+    font-size: 0.75rem;
+    font-weight: 600;
+}
+
+.loading-indicator::before {
+    content: "⟳ ";
+    display: inline-block;
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+/* Surveys List */
+.surveys-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 20px 30px;
+}
+
+.empty-message {
+    text-align: center;
+    color: var(--text-tertiary);
+    padding: 60px 20px;
+    font-size: 1.1rem;
+}
+
+/* Survey Item */
+.survey-item {
+    background-color: var(--brand-navy);
+    border: 1px solid rgba(249, 168, 37, 0.15);
+    border-radius: var(--radius-md);
+    padding: 24px 28px;
+    margin-bottom: 20px;
+    transition: all 0.2s ease;
+    position: relative;
+}
+
+.survey-item:hover {
+    border-color: var(--brand-yellow);
+    box-shadow: 0 4px 12px rgba(249, 168, 37, 0.15);
+    transform: translateY(-2px);
+}
+
+.survey-item-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 20px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+/* Checkbox overlay on right side, below header - doesn't affect layout */
+.survey-checkbox-overlay-container {
+    position: absolute;
+    top: 70px;
+    right: 28px;
+    z-index: 20;
+    display: flex !important;
+    align-items: center;
+}
+
+.survey-checkbox-overlay {
+    display: flex !important;
+    align-items: center;
+    margin: 0 !important;
+}
+
+.survey-checkbox-overlay label {
+    display: flex !important;
+    align-items: center;
+    margin: 0 !important;
+    padding: 0 !important;
+    min-height: 0 !important;
+}
+
+/* Hide label text but show checkbox */
+.survey-checkbox-overlay label > *:not(input) {
+    display: none !important;
+}
+
+.survey-checkbox-overlay input[type="checkbox"] {
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    appearance: none;
+    width: 22px !important;
+    height: 22px !important;
+    background: rgba(18, 24, 41, 0.8) !important;
+    border: 2px solid rgba(249, 168, 37, 0.5) !important;
+    border-radius: 4px;
+    cursor: pointer;
+    position: relative;
+    transition: all 0.15s ease;
+    margin: 0 !important;
+    display: block !important;
+}
+
+.survey-checkbox-overlay input[type="checkbox"]:hover {
+    border-color: var(--brand-yellow) !important;
+    box-shadow: 0 0 8px rgba(249, 168, 37, 0.5);
+    background: rgba(249, 168, 37, 0.15) !important;
+}
+
+.survey-checkbox-overlay input[type="checkbox"]:checked {
+    background: var(--brand-yellow) !important;
+    border-color: var(--brand-yellow) !important;
+}
+
+.survey-checkbox-overlay input[type="checkbox"]:checked::after {
+    content: '';
+    position: absolute;
+    left: 6px;
+    top: 2px;
+    width: 5px;
+    height: 10px;
+    border: solid var(--bg-dark);
+    border-width: 0 2px 2px 0;
+    transform: rotate(45deg);
+}
+
+.survey-name-row {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 4px;
+}
+
+.survey-name {
+    font-size: 1.15rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    letter-spacing: -0.01em;
+}
+
+.survey-separator {
+    color: var(--text-tertiary);
+    font-weight: 300;
+    margin: 0 4px;
+}
+
+.survey-position {
+    font-size: 0.9rem;
+    font-weight: 500;
+    color: var(--brand-yellow);
+    max-width: 350px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    opacity: 0.95;
+}
+
+.trait-badge {
+    display: inline-block;
+    background: linear-gradient(135deg, var(--brand-yellow) 0%, var(--brand-yellow-hover) 100%);
+    color: var(--brand-navy);
+    padding: 5px 14px;
+    border-radius: 20px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.survey-date {
+    font-size: 0.85rem;
+    color: var(--brand-yellow);
+    font-weight: 600;
+    margin-left: auto;
+    opacity: 0.9;
+}
+
+/* Status Indicators (for future JazzHR) */
+.status-pending {
+    color: var(--text-tertiary);
+    font-size: 1.5rem;
+    line-height: 1;
+}
+
+.status-uploaded {
+    color: #22c55e;
+    font-size: 1.2rem;
+}
+
+.status-missing {
+    color: #ef4444;
+    font-size: 1.2rem;
+}
+
+/* Survey Info Grid */
+.survey-info {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 16px 24px;
+    position: relative;
+    margin-bottom: 0;
+    padding-right: 200px; /* Space for checkbox and upload button with more separation */
+}
+
+.info-field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.info-label {
+    font-size: 0.65rem;
+    color: var(--text-tertiary);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+}
+
+.info-value {
+    color: var(--text-primary);
+    font-weight: 500;
+    font-size: 0.95rem;
+    word-break: break-word;
+    line-height: 1.4;
+}
+
+.report-link {
+    color: var(--brand-yellow);
+    text-decoration: none;
+    font-weight: 600;
+    padding: 8px 16px;
+    border: 1px solid var(--brand-yellow);
+    border-radius: var(--radius-sm);
+    transition: all 0.2s ease;
+    display: inline-block;
+    font-size: 0.85rem;
+    width: fit-content;
+    letter-spacing: 0.2px;
+}
+
+.report-link:hover {
+    background-color: var(--brand-yellow);
+    color: var(--brand-navy);
+    transform: translateY(-1px);
+    box-shadow: 0 2px 8px rgba(249, 168, 37, 0.3);
+}
+
+/* Pagination */
+.pagination-controls {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 20px;
+    border-top: 1px solid var(--border-color);
+    background-color: var(--brand-navy-light);
+}
+
+.pagination-center {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 20px;
+    flex: 1;
+}
+
+.pagination-btn {
+    background-color: var(--brand-navy-lighter);
+    color: var(--brand-yellow);
+    border: 1px solid var(--brand-yellow);
+    padding: 6px 16px;
+    border-radius: var(--radius-md);
+    cursor: pointer;
+    font-size: 0.8rem;
+    font-weight: 600;
+    transition: all 0.2s ease;
+    font-family: 'Inter', sans-serif;
+}
+
+.pagination-btn:hover:not(:disabled) {
+    background-color: var(--brand-yellow);
+    color: var(--brand-navy);
+    transform: translateY(-2px);
+}
+
+.pagination-btn:disabled {
+    background-color: var(--brand-navy);
+    border-color: rgba(249, 168, 37, 0.3);
+    color: var(--text-tertiary);
+    cursor: not-allowed;
+    opacity: 0.5;
+}
+
+.page-info {
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    font-weight: 600;
+    min-width: 150px;
+    text-align: center;
+}
+
+
+/* Scrollbar Styling */
+.surveys-list::-webkit-scrollbar {
+    width: 8px;
+}
+
+.surveys-list::-webkit-scrollbar-track {
+    background: var(--brand-navy-light);
+}
+
+.surveys-list::-webkit-scrollbar-thumb {
+    background: var(--brand-yellow);
+    border-radius: 4px;
+}
+
+.surveys-list::-webkit-scrollbar-thumb:hover {
+    background: var(--brand-yellow-hover);
+}
+
+/* ===== JazzHR Status Indicators ===== */
+.status-checking,
+.status-uploaded,
+.status-missing,
+.status-not-found,
+.status-error,
+.status-pending {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.85rem;
+    padding: 6px 12px;
+    border-radius: 6px;
+    white-space: nowrap;
+    font-weight: 600;
+    letter-spacing: 0.2px;
+}
+
+.status-checking {
+    color: #666;
+    background: #f5f5f5;
+}
+
+.status-spinner {
+    width: 12px;
+    height: 12px;
+    border: 2px solid #f3f3f3;
+    border-top: 2px solid #3498db;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+.status-uploaded {
+    color: #27ae60;
+    background: #d5f4e6;
+    font-weight: 500;
+}
+
+.status-missing {
+    color: #f39c12;
+    background: #fff3cd;
+    font-weight: 500;
+}
+
+/* Force remove any emojis from status indicators - multiple methods */
+.status-missing,
+.status-uploaded,
+.status-not-found,
+.status-error,
+.status-pending {
+    font-variant-emoji: none;
+    /* Hide warning sign emoji specifically */
+    unicode-bidi: bidi-override;
+}
+
+/* Hide emoji characters using CSS content replacement */
+.status-missing::before,
+.status-uploaded::before,
+.status-not-found::before,
+.status-error::before,
+.status-pending::before {
+    content: none !important;
+    display: none !important;
+}
+
+/* Hide emoji characters in child elements */
+.status-missing *,
+.status-uploaded *,
+.status-not-found *,
+.status-error *,
+.status-pending * {
+    font-variant-emoji: none;
+}
+
+/* Use CSS to filter out emoji unicode ranges */
+.status-missing .status-text,
+.status-uploaded .status-text,
+.status-not-found .status-text,
+.status-error .status-text,
+.status-pending .status-text {
+    /* Filter out warning sign (U+26A0) and other common emojis */
+    font-feature-settings: "liga" off;
+    text-rendering: optimizeLegibility;
+}
+
+
+.status-not-found {
+    color: #95a5a6;
+    background: #f8f9fa;
+}
+
+.status-error {
+    color: #e74c3c;
+    background: #fadbd8;
+}
+
+.status-pending {
+    color: #bdc3c7;
+    background: #f8f9fa;
+}
+
+.status-icon {
+    font-size: 1rem;
+    line-height: 1;
+}
+
+.status-icon-success {
+    color: #27ae60;
+}
+
+.status-icon-warning {
+    color: #f39c12;
+}
+
+/* Hide status-icon divs in all status indicators*/
+.status-missing .status-icon,
+.status-uploaded .status-icon,
+.status-not-found .status-icon,
+.status-error .status-icon,
+.status-pending .status-icon {
+    display: none !important;
+    visibility: hidden !important;
+}
+
+.status-icon-error {
+    color: #e74c3c;
+}
+
+.status-text {
+    font-size: 0.85rem;
+    line-height: 1;
+}
+
+/* ===== Upload Feature Styles ===== */
+
+/* Checkbox container - positioned absolutely in bottom right, aligned with View PDF button */
+.survey-item {
+    position: relative;
+}
+
+.survey-upload-container {
+    position: absolute;
+    right: 28px;
+    bottom: 24px;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+}
+
+/* Single upload button */
+.upload-single-btn {
+    padding: 8px 16px;
+    background: linear-gradient(135deg, var(--brand-yellow) 0%, var(--brand-yellow-hover) 100%);
+    color: var(--brand-navy);
+    border: none;
+    border-radius: var(--radius-sm);
+    font-size: 0.85rem;
+    font-weight: 600;
+    font-family: 'Inter', sans-serif;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    white-space: nowrap;
+    letter-spacing: 0.3px;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.upload-single-btn:hover:not(:disabled) {
+    transform: translateY(-1px);
+    box-shadow: 0 2px 8px rgba(249, 168, 37, 0.3);
+}
+
+.upload-single-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+    background: rgba(249, 168, 37, 0.5);
+}
+
+/* Custom checkbox styling - bottom right */
+.survey-checkbox-bottom {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.survey-checkbox-bottom label {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    cursor: pointer;
+    padding: 0;
+    margin: 0;
+    line-height: 0;
+    font-size: 0;
+}
+
+/* Hide all text in the label */
+.survey-checkbox-bottom label > *:not(input) {
+    display: none !important;
+}
+
+.survey-checkbox-bottom label:hover {
+    background: rgba(249, 168, 37, 0.2);
+    border-color: var(--brand-yellow);
+}
+
+.survey-checkbox-bottom input[type="checkbox"] {
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    appearance: none;
+    width: 16px;
+    height: 16px;
+    border: 2px solid var(--brand-yellow);
+    border-radius: 3px;
+    background: transparent;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    position: relative;
+}
+
+.survey-checkbox-bottom input[type="checkbox"]:checked {
+    background: var(--brand-yellow);
+}
+
+.survey-checkbox-bottom input[type="checkbox"]:checked::after {
+    content: '';
+    position: absolute;
+    left: 4px;
+    top: 1px;
+    width: 4px;
+    height: 8px;
+    border: solid var(--brand-navy);
+    border-width: 0 2px 2px 0;
+    transform: rotate(45deg);
+}
+
+.survey-checkbox-bottom input[type="checkbox"]:hover {
+    box-shadow: 0 0 8px rgba(249, 168, 37, 0.4);
+}
+
+/* Select all checkbox - rightmost */
+.select-all-container {
+    display: flex;
+    align-items: center;
+    margin-left: auto;
+}
+
+.select-all-checkbox {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.select-all-checkbox label {
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 12px;
+    color: var(--brand-yellow);
+    font-size: 0.9rem;
+    font-family: 'Inter', sans-serif;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    line-height: 1.2;
+    margin: 0;
+    padding: 0;
+    height: auto; /* Let height adjust naturally */
+    width: auto;
+}
+
+.select-all-checkbox label:hover {
+    color: var(--brand-yellow-hover);
+}
+
+.select-all-checkbox input[type="checkbox"] {
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    appearance: none;
+    width: 18px;
+    height: 18px;
+    border: 2px solid var(--brand-yellow);
+    border-radius: 3px;
+    background: transparent;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    position: relative;
+    flex-shrink: 0;
+    margin: 0;
+    padding: 0;
+    display: block;
+}
+
+.select-all-checkbox input[type="checkbox"]:checked {
+    background: var(--brand-yellow);
+}
+
+.select-all-checkbox input[type="checkbox"]:checked::after {
+    content: '';
+    position: absolute;
+    left: 5px;
+    top: 1px;
+    width: 5px;
+    height: 9px;
+    border: solid var(--brand-navy);
+    border-width: 0 2px 2px 0;
+    transform: rotate(45deg);
+}
+
+/* Selection count */
+.selection-count {
+    color: var(--brand-yellow);
+    font-size: 0.8rem;
+    font-weight: 600;
+    margin-left: 12px;
+}
+
+/* Upload button */
+.upload-btn {
+    background: linear-gradient(135deg, var(--brand-yellow) 0%, var(--brand-yellow-hover) 100%);
+    color: var(--brand-navy);
+    border: none;
+    padding: 6px 16px;
+    border-radius: var(--radius-md);
+    cursor: pointer;
+    font-size: 0.85rem;
+    font-weight: 700;
+    font-family: 'Inter', sans-serif;
+    transition: all 0.2s ease;
+    margin-right: 12px;
+}
+
+.upload-btn:hover:not(:disabled) {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(249, 168, 37, 0.4);
+}
+
+.upload-btn:disabled {
+    background: var(--brand-navy-lighter);
+    color: var(--text-tertiary);
+    cursor: not-allowed;
+    opacity: 0.6;
+}
+
+/* Upload status */
+.upload-status {
+    color: var(--brand-yellow);
+    font-size: 0.8rem;
+    font-weight: 600;
+    margin-right: 16px;
+    min-width: 120px;
+    text-align: right;
+}
+
+/* Header right adjustments */
+.header-right {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    flex: 0 0 auto;
+    gap: 8px;
+}
+
+/* Panel header - SURVEYS left, Search center, Select All right */
+.panel-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px;
+}
