@@ -136,14 +136,36 @@ class SimpleSurveyService:
         
         return surveys
     
-    def load_surveys(self, force_refresh: bool = False) -> List[Dict]:
+    def load_surveys(self, force_refresh: bool = False, wait_if_loading: bool = True) -> List[Dict]:
         """Load all surveys from CSV."""
         with self._lock:
             if self._is_loaded and not force_refresh:
                 return self._all_surveys
             if self._is_loading:
+                if wait_if_loading:
+                    # Wait for loading to complete (another thread is loading)
+                    log("Another thread is loading surveys - waiting...", "WARN")
+                else:
+                    return self._all_surveys
+            else:
+                self._is_loading = True
+        
+        # If another thread is loading, wait for it to complete
+        if wait_if_loading:
+            max_wait = 30  # seconds
+            waited = 0
+            while self._is_loading and not self._is_loaded and waited < max_wait:
+                time.sleep(0.5)
+                waited += 0.5
+            if self._is_loaded:
+                log(f"Loading completed by another thread (waited {waited:.1f}s)", "WARN")
                 return self._all_surveys
-            self._is_loading = True
+            # If still not loaded after waiting, try loading ourselves
+            with self._lock:
+                if not self._is_loading:
+                    self._is_loading = True
+                else:
+                    return self._all_surveys  # Another thread is still loading
         
         try:
             log("Downloading fresh CSV data...", "WARN")
@@ -595,7 +617,7 @@ log("Starting app - loading surveys from CSV...", "WARN")
 
 def _background_csv_load():
     try:
-        survey_service.load_surveys(force_refresh=True)
+        survey_service.load_surveys(force_refresh=True, wait_if_loading=False)
         # Update smart cache with recent survey IDs (for TTL handling)
         all_surveys = survey_service.get_all_surveys()
         recent_ids = [str(s['surveyId']) for s in all_surveys[:RECENT_SURVEY_THRESHOLD]]
@@ -938,8 +960,8 @@ def display_surveys(page, search_query, refresh_trigger, n_intervals):
         
         # If not loaded, trigger loading NOW (handles multi-worker scenarios on Render)
         if not is_loaded:
-            log("Surveys not loaded in this worker - loading now...", "WARN")
-            survey_service.load_surveys(force_refresh=False)
+            log("Surveys not loaded in this worker - loading/waiting...", "WARN")
+            survey_service.load_surveys(force_refresh=False, wait_if_loading=True)
             # Update smart cache with recent survey IDs
             all_surveys = survey_service.get_all_surveys()
             if all_surveys:
@@ -1120,7 +1142,7 @@ def handle_refresh_ci(n_clicks, current_trigger):
     background_checker.stop_checking()
     
     def _reload():
-        survey_service.load_surveys(force_refresh=True)
+        survey_service.load_surveys(force_refresh=True, wait_if_loading=False)
         background_checker.start_checking()
     
     Thread(target=_reload, daemon=True).start()
