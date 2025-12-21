@@ -70,9 +70,17 @@ class CultureIndexClient:
         email: str,
         password: str,
         remember: bool = True,
-        timezone_offset: int = -360,
+        timezone_offset: Optional[int] = None,
     ) -> dict[str, Any]:
         login_url = f"{self.config.base_url}/api/identity/Login"
+        
+        if timezone_offset is None:
+            try:
+                now = datetime.now(timezone.utc).astimezone()
+                local_offset = int(now.utcoffset().total_seconds() // 60)
+                timezone_offset = local_offset
+            except Exception:
+                timezone_offset = 0
         
         payload = {
             "username": email,
@@ -87,6 +95,7 @@ class CultureIndexClient:
         }
         
         try:
+            log.warning(f"Login attempt: username={email}, timezoneOffset={timezone_offset}, remember={remember}")
             response = self.session.post(
                 login_url,
                 json=payload,
@@ -94,7 +103,14 @@ class CultureIndexClient:
                 timeout=self.config.timeout,
             )
             
-            if response.status_code == 401:
+            if response.status_code == 400:
+                try:
+                    error_body = response.text[:500]
+                    log.error(f"Bad Request (400) - Response body: {error_body}")
+                except Exception:
+                    pass
+                raise CultureIndexAuthError(f"Bad Request (400): Invalid request parameters")
+            elif response.status_code == 401:
                 raise CultureIndexAuthError("Invalid credentials")
             elif response.status_code == 403:
                 raise CultureIndexAuthError("Access forbidden")
