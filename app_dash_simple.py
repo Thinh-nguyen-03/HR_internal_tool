@@ -936,15 +936,28 @@ def display_surveys(page, search_query, refresh_trigger, n_intervals):
         if page is None or page < 1:
             page = 1
         
-        # Check if loaded - show loading message if not ready
+        # If not loaded, trigger loading NOW (handles multi-worker scenarios on Render)
         if not is_loaded:
-            result = (
-                [html.Div("Loading surveys...", className="empty-message")],
-                "Loading...", True, True, "Loading data...",
-                [], [], {"display": "block"}
-            )
-            _last_render_result = result
-            return result
+            log("Surveys not loaded in this worker - loading now...", "WARN")
+            survey_service.load_surveys(force_refresh=False)
+            # Update smart cache with recent survey IDs
+            all_surveys = survey_service.get_all_surveys()
+            if all_surveys:
+                recent_ids = [str(s['surveyId']) for s in all_surveys[:RECENT_SURVEY_THRESHOLD]]
+                jazzhr_cache.set_recent_surveys(recent_ids)
+                log(f"Worker loaded {len(all_surveys)} surveys", "WARN")
+                # Start background JazzHR checker for this worker
+                background_checker.start_checking()
+                is_loaded = True  # Update local flag
+            else:
+                # Still not loaded - return loading message
+                result = (
+                    [html.Div("Loading surveys...", className="empty-message")],
+                    "Loading...", True, True, "Loading data...",
+                    [], [], {"display": "block"}
+                )
+                _last_render_result = result
+                return result
         
         # Get surveys
         if search_query and len(search_query) >= 2:
