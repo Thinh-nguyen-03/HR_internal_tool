@@ -33,7 +33,7 @@ UPLOAD_RETRY_DELAY_BASE = int(os.getenv('UPLOAD_RETRY_DELAY_BASE', '2'))
 UPLOAD_RETRY_DELAY_MAX = int(os.getenv('UPLOAD_RETRY_DELAY_MAX', '10'))
 
 # UI Polling Intervals (milliseconds)
-POLL_INTERVAL_MS = int(os.getenv('POLL_INTERVAL_MS', '3000'))
+POLL_INTERVAL_MS = int(os.getenv('POLL_INTERVAL_MS', '15000'))  # 15 seconds default - must be longer than callback execution time
 UPLOAD_INTERVAL_MS = int(os.getenv('UPLOAD_INTERVAL_MS', '1000'))
 
 # PDF Fetch Configuration
@@ -523,28 +523,50 @@ class BackgroundJazzHRChecker:
             if not all_surveys:
                 return
             
-            # Only check latest MAX_BACKGROUND_CHECK surveys - older ones use cache
-            surveys_to_check = all_surveys[:MAX_BACKGROUND_CHECK]
+            # Priority: Check first page immediately, then continue with remaining surveys
             total_surveys = len(all_surveys)
+            first_page_count = ITEMS_PER_PAGE  # Check first visible page immediately
             
-            log(f"JazzHR Checker: Checking {len(surveys_to_check)} of {total_surveys} surveys (older surveys use cache)", "WARN")
+            # Check if first page needs checking (if any are uncached)
+            first_page_surveys = all_surveys[:first_page_count]
+            first_page_need_check = []
+            for s in first_page_surveys:
+                survey_id = str(s['surveyId'])
+                if not self.jazzhr_service.cache.get(survey_id):
+                    first_page_need_check.append(s)
             
-            batch_size = ITEMS_PER_PAGE
-            for i in range(0, len(surveys_to_check), batch_size):
-                if self._stop_flag:
-                    break
-                
-                batch = surveys_to_check[i:i + batch_size]
-                urls = {str(s['surveyId']): s.get('surveyReportUrl') for s in batch}
+            # Prioritize first page if needed
+            if first_page_need_check:
+                log(f"JazzHR Checker: Prioritizing first page ({len(first_page_need_check)} uncached)", "WARN")
+                urls = {str(s['surveyId']): s.get('surveyReportUrl') for s in first_page_need_check}
                 urls_to_check = {sid: url for sid, url in urls.items() if url}
                 pdf_sizes = fetch_pdf_sizes(urls_to_check, self.pdf_cache)
-                
-                self.jazzhr_service.check_surveys_batch(batch, urls, pdf_sizes)
-                
-                if i + batch_size < len(surveys_to_check):
-                    time.sleep(1)
+                self.jazzhr_service.check_surveys_batch(first_page_need_check, urls, pdf_sizes)
             
-            log(f"JazzHR Checker: Completed checking {len(surveys_to_check)} surveys", "WARN")
+            # Continue with remaining surveys (excluding first page already checked)
+            remaining_surveys = all_surveys[first_page_count:MAX_BACKGROUND_CHECK]
+            checked_count = len(first_page_need_check) if first_page_need_check else 0
+            
+            if remaining_surveys:
+                log(f"JazzHR Checker: Checking {len(remaining_surveys)} remaining surveys (of {total_surveys} total, older surveys use cache)", "WARN")
+                
+                batch_size = ITEMS_PER_PAGE
+                for i in range(0, len(remaining_surveys), batch_size):
+                    if self._stop_flag:
+                        break
+                    
+                    batch = remaining_surveys[i:i + batch_size]
+                    urls = {str(s['surveyId']): s.get('surveyReportUrl') for s in batch}
+                    urls_to_check = {sid: url for sid, url in urls.items() if url}
+                    pdf_sizes = fetch_pdf_sizes(urls_to_check, self.pdf_cache)
+                    
+                    self.jazzhr_service.check_surveys_batch(batch, urls, pdf_sizes)
+                    checked_count += len(batch)
+                    
+                    if i + batch_size < len(remaining_surveys):
+                        time.sleep(1)
+            
+            log(f"JazzHR Checker: Completed checking {checked_count} surveys", "WARN")
             
         except Exception as e:
             log(f"JazzHR Checker error: {e}", "ERROR")
@@ -758,7 +780,6 @@ app.layout = html.Div([
     dcc.Store(id="uploadable-ids", data=[]),
     dcc.Store(id="upload-queue", data=[]),
     dcc.Store(id="upload-results", data={}),
-    dcc.Store(id="cache-version", data=0),
     dcc.Store(id="refresh-trigger", data=0),
     
     # Intervals (configurable via .env)
@@ -862,7 +883,11 @@ def build_survey_display(surveys: List[Dict], jazzhr_results: Dict, pdf_sizes: D
     
     return survey_items, uploadable_ids, surveys_data
 
-# CALLBACK 1: Main Display (triggered by page/search/refresh changes)
+# Callback lock to prevent race conditions
+_callback_lock = Lock()
+_last_render_result = None
+
+# CALLBACK 1: Main Display (triggered by page/search/refresh/interval)
 @callback(
     [Output("surveys-container", "children"),
      Output("page-info", "children"),
@@ -871,39 +896,55 @@ def build_survey_display(surveys: List[Dict], jazzhr_results: Dict, pdf_sizes: D
      Output("last-updated", "children"),
      Output("current-surveys-data", "data"),
      Output("uploadable-ids", "data"),
-     Output("loading-indicator", "style"),
-     Output("cache-version", "data")],
+     Output("loading-indicator", "style")],
     [Input("current-page", "data"),
      Input("search-query", "data"),
      Input("refresh-trigger", "data"),
      Input("poll-interval", "n_intervals")],
-    [State("cache-version", "data")],
     prevent_initial_call=False
 )
-def display_surveys(page, search_query, refresh_trigger, n_intervals, last_cache_version):
-    """Display surveys - pure rendering, no side effects."""
-    try:
-        start_time = time.time()
-        triggered_id = ctx.triggered_id
-        is_loaded = survey_service.is_loaded()
-        
-        # Check if loaded - show loading message if not ready
-        if not is_loaded:
+def display_surveys(page, search_query, refresh_trigger, n_intervals):
+    """Display surveys - simple rendering, always returns content."""
+    global _last_render_result
+    
+    # Try to acquire lock - if another callback is running, return cached result
+    acquired = _callback_lock.acquire(blocking=False)
+    if not acquired:
+        # Another callback is in progress - return last result or loading
+        if _last_render_result:
+            log("Callback skipped - another in progress, using cached result", "WARN")
+            return _last_render_result
+        else:
             return (
                 [html.Div("Loading surveys...", className="empty-message")],
                 "Loading...", True, True, "Loading data...",
-                [], [], {"display": "block"}, 0
+                [], [], {"display": "block"}
             )
+    
+    try:
+        start_time = time.time()
+        try:
+            triggered_id = ctx.triggered_id
+        except (AttributeError, RuntimeError):
+            triggered_id = None
+        is_loaded = survey_service.is_loaded()
         
-        # For interval, check if we should skip this update
-        if triggered_id == "poll-interval":
-            current_version = jazzhr_cache.get_version()
-            
-            # If this is the first render after loading (last was 0 or None), allow it
-            # Otherwise, only update if cache actually changed
-            if last_cache_version is not None and last_cache_version != 0:
-                if current_version == last_cache_version:
-                    return (dash.no_update,) * 9
+        # Debug logging
+        log(f"display_surveys called: page={page}, search={search_query}, trigger={triggered_id}, loaded={is_loaded}", "WARN")
+        
+        # Ensure page is valid
+        if page is None or page < 1:
+            page = 1
+        
+        # Check if loaded - show loading message if not ready
+        if not is_loaded:
+            result = (
+                [html.Div("Loading surveys...", className="empty-message")],
+                "Loading...", True, True, "Loading data...",
+                [], [], {"display": "block"}
+            )
+            _last_render_result = result
+            return result
         
         # Get surveys
         if search_query and len(search_query) >= 2:
@@ -914,39 +955,65 @@ def display_surveys(page, search_query, refresh_trigger, n_intervals, last_cache
         else:
             surveys, total_count = survey_service.get_page(page)
         
+        log(f"Got {len(surveys) if surveys else 0} surveys, total={total_count}", "WARN")
+        
         if not surveys:
             msg = f"No results for '{search_query}'" if search_query else "No surveys found."
-            return (
+            result = (
                 [html.Div(msg, className="empty-message")],
                 "0 results", True, True, f"Updated: {datetime.now().strftime('%I:%M:%S %p')}",
-                [], [], {"display": "none"}, jazzhr_cache.get_version()
+                [], [], {"display": "none"}
             )
+            _last_render_result = result
+            return result
         
-        # Get JazzHR status - use cache-only on interval triggers to avoid slowdown
+        # Get JazzHR status - use cache-only for fast initial render
         urls = {str(s['surveyId']): s.get('surveyReportUrl') for s in surveys}
         
-        # Only fetch PDF sizes and do JazzHR checks if NOT an interval trigger
-        # Background checker handles JazzHR updates
-        if triggered_id == "poll-interval":
-            # Fast path: cache-only for interval updates
+        # Use fast path (cache-only) for interval triggers and initial load
+        # Only do full checks on explicit refresh button click (refresh-trigger input)
+        if triggered_id == "refresh-trigger":
+            # Slow path: full checks only on explicit refresh button click
+            urls_to_check = {sid: url for sid, url in urls.items() if url}
+            pdf_sizes = fetch_pdf_sizes(urls_to_check, pdf_size_cache)
+            jazzhr_results = jazzhr_service.check_surveys_batch(surveys, urls, pdf_sizes)
+        else:
+            # Fast path: cache-only for interval updates, initial load, page changes, search, etc.
+            # Background checker handles JazzHR updates
+            # Use batch retrieval for much faster performance (single Redis call vs 15+)
             pdf_sizes = {}
+            survey_ids = [str(s['surveyId']) for s in surveys]
+            cached_batch = jazzhr_cache.get_batch(survey_ids)
             jazzhr_results = {}
-            for s in surveys:
-                survey_id = str(s['surveyId'])
-                cached = jazzhr_cache.get(survey_id)
+            for survey_id in survey_ids:
+                cached = cached_batch.get(survey_id)
                 if cached:
                     jazzhr_results[survey_id] = cached
                 else:
                     # Default to checking status for uncached items
                     jazzhr_results[survey_id] = {"status": None, "isUploaded": False}
-        else:
-            # Slow path: full checks for user-initiated actions (page change, search, refresh)
-            urls_to_check = {sid: url for sid, url in urls.items() if url}
-            pdf_sizes = fetch_pdf_sizes(urls_to_check, pdf_size_cache)
-            jazzhr_results = jazzhr_service.check_surveys_batch(surveys, urls, pdf_sizes)
         
         # Build display
-        survey_items, uploadable_ids, surveys_data = build_survey_display(surveys, jazzhr_results, pdf_sizes)
+        try:
+            survey_items, uploadable_ids, surveys_data = build_survey_display(surveys, jazzhr_results, pdf_sizes)
+            log(f"Built display: {len(survey_items)} items, {len(uploadable_ids)} uploadable", "WARN")
+        except Exception as e:
+            log(f"ERROR building survey display: {e}", "ERROR")
+            import traceback
+            traceback.print_exc()
+            survey_items = [html.Div(f"Error building display: {str(e)}", className="empty-message")]
+            uploadable_ids = []
+            surveys_data = []
+        
+        # Ensure survey_items is always a valid list
+        if not survey_items or len(survey_items) == 0:
+            log(f"WARNING: No survey items generated for page {page}, surveys count: {len(surveys)}, jazzhr_results count: {len(jazzhr_results)}", "WARN")
+            survey_items = [html.Div("No surveys to display", className="empty-message")]
+        
+        # Ensure survey_items is a list (not None, not empty tuple, etc.)
+        if not isinstance(survey_items, list):
+            log(f"ERROR: survey_items is not a list: {type(survey_items)}", "ERROR")
+            survey_items = [html.Div("Error: Invalid survey data format", className="empty-message")]
         
         total_pages = max(1, (total_count + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE)
         
@@ -958,28 +1025,29 @@ def display_surveys(page, search_query, refresh_trigger, n_intervals, last_cache
         elapsed = time.time() - start_time
         updated_text = f"Updated: {datetime.now().strftime('%I:%M:%S %p')} ({elapsed:.1f}s) [Cache: {jazzhr_cache.get_count()}]"
         
-        current_version = jazzhr_cache.get_version()
+        log(f"Returning: {len(survey_items)} items, page_info={page_info}", "WARN")
         
-        # If cache version is still 0, use a timestamp-based version instead
-        # This ensures we don't get stuck in a loop
-        if current_version == 0:
-            current_version = int(time.time() * 1000) % 1000000  # millisecond timestamp mod 1M
-        
-        return (
+        result = (
             survey_items, page_info,
             page <= 1, page >= total_pages,
             updated_text, surveys_data, uploadable_ids,
-            {"display": "none"}, current_version
+            {"display": "none"}
         )
+        _last_render_result = result
+        return result
     except Exception as e:
         log(f"ERROR in display_surveys: {e}", "ERROR")
         import traceback
         traceback.print_exc()
-        return (
+        result = (
             [html.Div(f"Error loading surveys: {str(e)}", className="empty-message")],
             "Error", True, True, "Error",
-            [], [], {"display": "none"}, 0
+            [], [], {"display": "none"}
         )
+        _last_render_result = result
+        return result
+    finally:
+        _callback_lock.release()
 
 # CALLBACK 2: Pagination (prev/next buttons)
 @callback(
