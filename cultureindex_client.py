@@ -104,12 +104,25 @@ class CultureIndexClient:
             )
             
             if response.status_code == 400:
+                error_message = "Bad Request (400): Invalid request parameters"
                 try:
                     error_body = response.text[:500]
                     log.error(f"Bad Request (400) - Response body: {error_body}")
+                    try:
+                        error_json = response.json()
+                        if "errors" in error_json:
+                            validation_errors = error_json.get("errors", {})
+                            if "ValidationException" in validation_errors:
+                                validation_msg = validation_errors["ValidationException"]
+                                if isinstance(validation_msg, list) and validation_msg:
+                                    error_message = f"Authentication failed: {validation_msg[0]}"
+                                elif isinstance(validation_msg, str):
+                                    error_message = f"Authentication failed: {validation_msg}"
+                    except (ValueError, KeyError, TypeError):
+                        pass
                 except Exception:
                     pass
-                raise CultureIndexAuthError(f"Bad Request (400): Invalid request parameters")
+                raise CultureIndexAuthError(error_message)
             elif response.status_code == 401:
                 raise CultureIndexAuthError("Invalid credentials")
             elif response.status_code == 403:
