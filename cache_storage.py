@@ -107,6 +107,14 @@ class FileCache(CacheBackend):
                     return item
             return None
     
+    def get_batch(self, keys: List[str]) -> Dict[str, Optional[Dict]]:
+        """Get multiple items at once (for API consistency with Redis)."""
+        result = {}
+        with self._lock:
+            for key in keys:
+                result[key] = self.get(key)
+        return result
+    
     def get_permanent(self, key: str) -> Optional[Dict]:
         """Get item ignoring TTL."""
         with self._lock:
@@ -287,6 +295,27 @@ class RedisCache(CacheBackend):
             return None
         return self._safe_operation("get", do_get, default=None)
     
+    def get_batch(self, keys: List[str]) -> Dict[str, Optional[Dict]]:
+        """Get multiple items in a single Redis call. Much faster than individual gets."""
+        if not keys:
+            return {}
+        
+        def do_mget():
+            prefixed_keys = [self._key(k) for k in keys]
+            values = self._redis.mget(prefixed_keys)
+            result = {}
+            for key, data in zip(keys, values):
+                if data:
+                    try:
+                        result[key] = json.loads(data)
+                    except (json.JSONDecodeError, TypeError):
+                        result[key] = None
+                else:
+                    result[key] = None
+            return result
+        
+        return self._safe_operation("mget", do_mget, default={})
+    
     def get_permanent(self, key: str) -> Optional[Dict]:
         """Same as get() for Redis - TTL is handled at set time."""
         return self.get(key)
@@ -439,6 +468,15 @@ class SmartJazzHRCache:
         else:
             # Old survey - permanent cache (ignore TTL)
             return self.cache.get_permanent(survey_id)
+    
+    def get_batch(self, survey_ids: List[str]) -> Dict[str, Optional[Dict]]:
+        """Get multiple cached statuses in a single operation (much faster)."""
+        if not survey_ids:
+            return {}
+        
+        # Use batch get from underlying cache
+        str_ids = [str(sid) for sid in survey_ids]
+        return self.cache.get_batch(str_ids)
     
     def set(self, survey_id: str, value: Dict):
         """Set cached status - permanent for old surveys."""
