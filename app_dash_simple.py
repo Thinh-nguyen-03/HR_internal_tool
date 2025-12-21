@@ -13,7 +13,7 @@ import dash
 from dotenv import load_dotenv
 
 from cultureindex_client import CultureIndexClient
-from surveys_fetch import format_phone_number, get_survey_urls_from_csv
+from surveys_fetch import format_phone_number
 from check_jazzhr_uploads import JazzHRUploadChecker
 from cache_storage import create_cache, SmartJazzHRCache
 
@@ -83,6 +83,9 @@ class SimpleSurveyService:
         
         if not email or not password:
             raise ValueError("Missing CULTUREINDEX_EMAIL or CULTUREINDEX_PASSWORD")
+        
+        email = email.strip()
+        password = password.strip()
         
         self._client = CultureIndexClient()
         self._client.login(email=email, password=password)
