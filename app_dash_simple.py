@@ -13,10 +13,10 @@ from dash import Dash, html, dcc, Input, Output, State, callback, ctx, ALL
 import dash
 from dotenv import load_dotenv
 
-from cultureindex_client_1 import CultureIndexClient
+from cultureindex_client import CultureIndexClient
 from surveys_fetch import format_phone_number
 from check_jazzhr_uploads import JazzHRUploadChecker
-from cache_storage_1 import create_cache, SmartJazzHRCache
+from cache_storage import create_cache, SmartJazzHRCache
 
 load_dotenv()
 
