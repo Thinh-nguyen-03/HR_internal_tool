@@ -12,37 +12,35 @@ import requests
 from dash import Dash, html, dcc, Input, Output, State, callback, ctx, ALL
 import dash
 from dotenv import load_dotenv
+from flask import redirect, request, session
+from flask_login import current_user, logout_user
 
-from cultureindex_client import CultureIndexClient
+from cultureindex_client_1 import CultureIndexClient
 from surveys_fetch import format_phone_number
 from check_jazzhr_uploads import JazzHRUploadChecker
-from cache_storage import create_cache, SmartJazzHRCache
+from cache_storage_1 import create_cache, SmartJazzHRCache
+from auth import AuthManager
+from login_layout import create_login_layout
 
 load_dotenv()
 
-# CONFIGURATION 
 ITEMS_PER_PAGE = int(os.getenv('ITEMS_PER_PAGE', '15'))
 MAX_BATCH_UPLOAD = int(os.getenv('MAX_BATCH_UPLOAD', '15'))
-MAX_BACKGROUND_CHECK = int(os.getenv('MAX_BACKGROUND_CHECK', '250'))  # Only check latest N surveys in background
-RECENT_SURVEY_THRESHOLD = int(os.getenv('RECENT_SURVEY_THRESHOLD', '1000'))  # Latest N surveys have normal TTL, older ones are permanent
+MAX_BACKGROUND_CHECK = int(os.getenv('MAX_BACKGROUND_CHECK', '250'))
+RECENT_SURVEY_THRESHOLD = int(os.getenv('RECENT_SURVEY_THRESHOLD', '1000'))
 CLIENT_ID = os.getenv('CLIENT_ID', 'A89F5B0000')
 JAZZHR_CACHE_HOURS = int(os.getenv('JAZZHR_CACHE_HOURS', '24'))
 
-# Upload Retry Configuration
 UPLOAD_MAX_RETRIES = int(os.getenv('UPLOAD_MAX_RETRIES', '3'))
 UPLOAD_RETRY_DELAY_BASE = int(os.getenv('UPLOAD_RETRY_DELAY_BASE', '2'))
 UPLOAD_RETRY_DELAY_MAX = int(os.getenv('UPLOAD_RETRY_DELAY_MAX', '10'))
 
-# UI Polling Intervals (milliseconds)
-POLL_INTERVAL_MS = int(os.getenv('POLL_INTERVAL_MS', '15000'))  # 15 seconds default - must be longer than callback execution time
+POLL_INTERVAL_MS = int(os.getenv('POLL_INTERVAL_MS', '15000'))
 UPLOAD_INTERVAL_MS = int(os.getenv('UPLOAD_INTERVAL_MS', '1000'))
-
-# PDF Fetch Configuration
 PDF_FETCH_TIMEOUT = int(os.getenv('PDF_FETCH_TIMEOUT', '5'))
 
-# LOGGING
 def log(message: str, level: str = "INFO"):
-    """Log with levels: ERROR, WARN, PERF, INFO"""
+    """Log message to console and file. Levels: ERROR, WARN, PERF."""
     if level not in ["ERROR", "WARN", "PERF"]:
         return
     
@@ -55,16 +53,13 @@ def log(message: str, level: str = "INFO"):
     except:
         pass
 
-# UTILITIES
 def parse_csv_date(date_str: Optional[str]) -> Optional[str]:
-    """Parse date from CSV - already in MM/DD/YYYY format."""
+    """Return date string if valid, None otherwise."""
     if not date_str or not date_str.strip():
             return None
     return date_str.strip()
 
-# SURVEY SERVICE
 class SimpleSurveyService:
-    """Survey service that uses CSV export as primary data source."""
     
     def __init__(self, client_id: str, items_per_page: int = 20):
         self.client_id = client_id
@@ -138,26 +133,17 @@ class SimpleSurveyService:
         return surveys
     
     def load_surveys(self, force_refresh: bool = False) -> List[Dict]:
-        """
-        Load all surveys from CSV.
-        
-        Simple synchronous loading for multi-process environments (Gunicorn).
-        Each worker loads independently on first request (~3s).
-        """
+        """Load surveys from CSV. Each Gunicorn worker loads independently."""
         with self._lock:
-            # Already loaded and not forcing refresh
             if self._is_loaded and not force_refresh:
                 return self._all_surveys
             
-            # Already loading in another thread in THIS worker - return what we have
             if self._is_loading:
                 log("Another thread is loading, returning current data", "WARN")
                 return self._all_surveys
             
-            # We'll do the loading
             self._is_loading = True
         
-        # Load the data
         try:
             log("Downloading CSV data...", "WARN")
             start = time.time()
@@ -186,14 +172,12 @@ class SimpleSurveyService:
         return self._all_surveys
     
     def get_page(self, page_num: int) -> Tuple[List[Dict], int]:
-        """Get a page of surveys."""
         total = len(self._all_surveys)
         start_idx = (page_num - 1) * self.items_per_page
         end_idx = start_idx + self.items_per_page
         return self._all_surveys[start_idx:end_idx], total
     
     def search_surveys(self, query: str, limit: int = 100) -> List[Dict]:
-        """Search surveys by name."""
         if not query or len(query) < 2:
             return []
         
@@ -214,7 +198,6 @@ class SimpleSurveyService:
             self._all_surveys = []
             self._is_loaded = False
 
-# JAZZHR SERVICE
 class SimpleJazzHRService:
     def __init__(self, api_key: str, cache, max_workers: int = 6):
         self.api_key = api_key
@@ -250,9 +233,9 @@ class SimpleJazzHRService:
         cached = self.cache.get(survey_id)
         if cached:
             if cached.get('status') == 'NO_PDF_URL' and pdf_url:
-                pass  # Re-check
+                pass
             elif cached.get('status') == 'NOT_UPLOADED' and pdf_size and not cached.get('had_pdf_size'):
-                pass  # Re-check
+                pass
             else:
                 return cached
         
@@ -313,7 +296,6 @@ class SimpleJazzHRService:
             return {"status": "ERROR", "isUploaded": False, "error": str(e)}
     
     def check_surveys_batch(self, surveys: List[Dict], urls: Dict[str, str], pdf_sizes: Dict[str, int]) -> Dict[str, Dict]:
-        """Check JazzHR status for multiple surveys in parallel."""
         results = {}
         to_check = []
         
@@ -348,12 +330,10 @@ class SimpleJazzHRService:
         self.cache.save()
         return results
 
-    # Errors that should NOT be retried (permanent failures)
-    # These are hardcoded as they represent API contract violations, not configurable behavior
     NON_RETRYABLE_ERRORS = [
-        "401",  # Unauthorized - bad API key
-        "403",  # Forbidden - no permission
-        "404",  # Not found - bad applicant ID
+        "401",
+        "403",
+        "404",
         "apikey not set",
         "invalid api key",
         "applicant_id was not set",
@@ -361,7 +341,6 @@ class SimpleJazzHRService:
     ]
     
     def _is_retryable_error(self, error_msg: str) -> bool:
-        """Check if an error is worth retrying."""
         if not error_msg:
             return True
         error_lower = error_msg.lower()
@@ -371,23 +350,13 @@ class SimpleJazzHRService:
         return True
     
     def upload_pdf_to_jazzhr(self, survey: Dict, pdf_url: str, applicant_id: str) -> Dict:
-        """
-        Upload a single PDF to JazzHR with automatic retry.
-        
-        Retry policy (configurable via .env):
-        - Max attempts: UPLOAD_MAX_RETRIES (default: 3)
-        - Exponential backoff: UPLOAD_RETRY_DELAY_BASE * 2^attempt (capped at UPLOAD_RETRY_DELAY_MAX)
-        - Does NOT retry on auth errors, 404s, or other permanent failures
-        - Returns immediately on success
-        """
+        """Upload PDF to JazzHR with exponential backoff retry. Does not retry permanent failures."""
         survey_id = str(survey.get('surveyId', ''))
         checker = self._get_checker()
         first_name = survey.get('firstName', '').strip()
         last_name = survey.get('lastName', '').strip()
         
         last_error = None
-        
-        # Use module-level config constants
         max_retries = UPLOAD_MAX_RETRIES
         delay_base = UPLOAD_RETRY_DELAY_BASE
         delay_max = UPLOAD_RETRY_DELAY_MAX
@@ -405,16 +374,14 @@ class SimpleJazzHRService:
                 )
                 
                 if result.get('success'):
-                    # Success - clear cache and return
                     self.cache.delete(survey_id)
                     self.cache.save()
                     return result
                 
-                # Check if error is retryable
                 error_msg = result.get('error', '')
                 if not self._is_retryable_error(error_msg):
                     log(f"Upload failed with non-retryable error: {error_msg}", "ERROR")
-                    return result  # Don't retry permanent failures
+                    return result
                 
                 last_error = error_msg
                 
@@ -422,7 +389,6 @@ class SimpleJazzHRService:
                 last_error = str(e)
                 log(f"Upload exception on attempt {attempt + 1}: {e}", "ERROR")
             
-            # Retry logic (only if not last attempt)
             if attempt < max_retries - 1:
                 delay = min(
                     delay_base * (2 ** attempt),
@@ -430,7 +396,6 @@ class SimpleJazzHRService:
                 )
                 time.sleep(delay)
         
-        # All retries exhausted
         log(f"Upload failed after {max_retries} attempts for {survey_id}: {last_error}", "ERROR")
         return {
             'success': False,
@@ -438,9 +403,7 @@ class SimpleJazzHRService:
             'survey_id': survey_id
         }
 
-# PDF SIZE FETCHER
 def fetch_pdf_sizes(urls: Dict[str, str], pdf_cache, max_workers: int = 8) -> Dict[str, int]:
-    """Fetch PDF sizes from URLs with caching."""
     if not urls:
         return {}
     
@@ -498,9 +461,7 @@ def fetch_pdf_sizes(urls: Dict[str, str], pdf_cache, max_workers: int = 8) -> Di
     
     return results
 
-# BACKGROUND JAZZHR CHECKER
 class BackgroundJazzHRChecker:
-    """Background checker for JazzHR status - only checks latest surveys."""
     
     def __init__(self, survey_service, jazzhr_service, pdf_cache):
         self.survey_service = survey_service
@@ -523,7 +484,6 @@ class BackgroundJazzHRChecker:
     
     def _check_worker(self):
         try:
-            # Wait for surveys to load
             max_wait = 60
             waited = 0
             while not self.survey_service.is_loaded() and waited < max_wait:
@@ -536,11 +496,9 @@ class BackgroundJazzHRChecker:
             if not all_surveys:
                 return
             
-            # Priority: Check first page immediately, then continue with remaining surveys
             total_surveys = len(all_surveys)
-            first_page_count = ITEMS_PER_PAGE  # Check first visible page immediately
+            first_page_count = ITEMS_PER_PAGE
             
-            # Check if first page needs checking (if any are uncached)
             first_page_surveys = all_surveys[:first_page_count]
             first_page_need_check = []
             for s in first_page_surveys:
@@ -548,7 +506,6 @@ class BackgroundJazzHRChecker:
                 if not self.jazzhr_service.cache.get(survey_id):
                     first_page_need_check.append(s)
             
-            # Prioritize first page if needed
             if first_page_need_check:
                 log(f"JazzHR Checker: Prioritizing first page ({len(first_page_need_check)} uncached)", "WARN")
                 urls = {str(s['surveyId']): s.get('surveyReportUrl') for s in first_page_need_check}
@@ -556,7 +513,6 @@ class BackgroundJazzHRChecker:
                 pdf_sizes = fetch_pdf_sizes(urls_to_check, self.pdf_cache)
                 self.jazzhr_service.check_surveys_batch(first_page_need_check, urls, pdf_sizes)
             
-            # Continue with remaining surveys (excluding first page already checked)
             remaining_surveys = all_surveys[first_page_count:MAX_BACKGROUND_CHECK]
             checked_count = len(first_page_need_check) if first_page_need_check else 0
             
@@ -584,14 +540,10 @@ class BackgroundJazzHRChecker:
         except Exception as e:
             log(f"JazzHR Checker error: {e}", "ERROR")
 
-# SERVICE INITIALIZATION
 survey_service = SimpleSurveyService(client_id=CLIENT_ID, items_per_page=ITEMS_PER_PAGE)
 
-# Create caches using the storage abstraction (supports file or Redis via CACHE_BACKEND env var)
 jazzhr_cache_backend = create_cache("jazzhr_status", ttl_hours=JAZZHR_CACHE_HOURS, cache_file="jazzhr_status_cache.json")
 pdf_size_cache = create_cache("pdf_sizes", ttl_hours=168, cache_file="pdf_sizes_cache.json")
-
-# Smart JazzHR cache: recent surveys (latest 2000) have normal TTL, older ones are permanent
 jazzhr_cache = SmartJazzHRCache(jazzhr_cache_backend, recent_threshold=RECENT_SURVEY_THRESHOLD)
 
 jazzhr_api_key = os.getenv('JAZZHR_API_KEY')
@@ -603,48 +555,30 @@ else:
 jazzhr_service = SimpleJazzHRService(api_key=jazzhr_api_key, cache=jazzhr_cache, max_workers=6)
 background_checker = BackgroundJazzHRChecker(survey_service, jazzhr_service, pdf_size_cache)
 
-# NOTE: Do NOT load surveys here at module level!
-# Gunicorn forks workers AFTER module import, so any background threads
-# or loaded data here would be lost/duplicated in workers.
-# Instead, surveys are loaded lazily on first request in each worker.
 log("App module loaded - surveys will load on first request", "WARN")
 
-# DASH APP
 app = Dash(__name__, suppress_callback_exceptions=True)
 app.title = "Culture Index - HR Tool"
-server = app.server  # Expose Flask server for health checks
+server = app.server
+
+# Initialize authentication
+auth_manager = AuthManager(server)
 
 if not os.path.exists("assets"):
     os.makedirs("assets")
 
-# =============================================================================
-# HEALTH CHECK ENDPOINT
-# =============================================================================
-
 @server.route('/health')
 def health_check():
-    """
-    Health check endpoint for monitoring and load balancers.
-    Returns JSON with system status.
-    
-    Usage: GET /health
-    Returns: {"status": "healthy/degraded/unhealthy", ...}
-    """
+    """Health check endpoint. Returns JSON with system status."""
     from flask import jsonify
     
     try:
-        # Check Redis cache
         redis_healthy = jazzhr_cache.ping()
         redis_status = jazzhr_cache.is_healthy()
-        
-        # Check PDF cache
         pdf_cache_healthy = pdf_size_cache.ping() if hasattr(pdf_size_cache, 'ping') else True
-        
-        # Check survey service
         surveys_loaded = survey_service.is_loaded()
         survey_count = len(survey_service.get_all_surveys()) if surveys_loaded else 0
         
-        # Determine overall status
         if redis_healthy and surveys_loaded:
             status = "healthy"
         elif redis_healthy or surveys_loaded:
@@ -684,10 +618,7 @@ def health_check():
 
 @server.route('/health/ready')
 def readiness_check():
-    """
-    Readiness check - returns 200 only when app is fully ready to serve requests.
-    Used by Kubernetes/cloud platforms to know when to route traffic.
-    """
+    """Readiness check. Returns 200 when app is ready to serve requests."""
     from flask import jsonify
     
     if not survey_service.is_loaded():
@@ -700,35 +631,83 @@ def readiness_check():
 
 @server.route('/health/live')
 def liveness_check():
-    """
-    Liveness check - returns 200 if app is running (even if degraded).
-    Used by Kubernetes/cloud platforms to know if app needs restart.
-    """
+    """Liveness check. Returns 200 if app is running."""
     from flask import jsonify
     return jsonify({"alive": True, "timestamp": datetime.now().isoformat()})
 
-# LAYOUT
-app.layout = html.Div([
-    html.Div([
-        # Header
+@server.route('/login', methods=['GET', 'POST'])
+def login():
+    """Login route - GET shows form, POST processes login"""
+    if current_user.is_authenticated:
+        return redirect('/')
+    
+    if request.method == 'POST':
+        username = request.form.get('username', '').strip()
+        password = request.form.get('password', '').strip()
+        
+        success, message = auth_manager.attempt_login(username, password)
+        
+        if success:
+            next_page = request.args.get('next')
+            if next_page and next_page.startswith('/'):
+                return redirect(next_page)
+            return redirect('/')
+        else:
+            # Return login page with error
+            return app.index(error_message=message)
+    
+    # GET request - show login form
+    return app.index()
+
+@server.route('/logout')
+def logout():
+    """Logout route"""
+    auth_manager.logout()
+    return redirect('/login')
+
+@server.before_request
+def require_login():
+    """Require authentication for all routes except login, logout, and health checks"""
+    allowed_routes = ['/login', '/logout', '/health', '/health/ready', '/health/live', '/_dash-layout', '/_dash-dependencies', '/_dash-update-component', '/_reload-hash']
+    
+    # Allow access to static assets
+    if request.path.startswith('/assets/') or request.path.startswith('/_dash-component-suites/'):
+        return None
+    
+    # Check if route is allowed
+    for route in allowed_routes:
+        if request.path.startswith(route):
+            return None
+    
+    # Require authentication for all other routes
+    if not current_user.is_authenticated:
+        return redirect('/login?next=' + request.path)
+
+def serve_layout():
+    """Serve layout based on authentication status"""
+    if not current_user.is_authenticated:
+        return create_login_layout()
+    
+    return html.Div([
         html.Div([
             html.Div([
-                html.Img(src="/assets/SENERGY-Logo_Icon-Yellow.png", className="header-logo"),
-            ], className="header-left"),
-            
-            html.Div([
-                html.Div("HR INTERNAL TOOL [v4.0]", className="header-title"),
-            ], className="header-center"),
-            
-            html.Div([
-                html.Div(id="upload-status", className="upload-status"),
-                html.Button("Upload Selected", id="upload-btn", className="upload-btn", n_clicks=0, disabled=True),
-                html.Button("Refresh JazzHR", id="refresh-jazzhr-btn", className="refresh-btn", n_clicks=0),
-                html.Button("Refresh CI", id="refresh-btn", className="refresh-btn", n_clicks=0),
-            ], className="header-right"),
-        ], className="header"),
+                html.Div([
+                    html.Img(src="/assets/SENERGY-Logo_Icon-Yellow.png", className="header-logo"),
+                ], className="header-left"),
+                
+                html.Div([
+                    html.Div("HR INTERNAL TOOL [v4.0]", className="header-title"),
+                ], className="header-center"),
+                
+                html.Div([
+                    html.Div(id="upload-status", className="upload-status"),
+                    html.Button("Upload Selected", id="upload-btn", className="upload-btn", n_clicks=0, disabled=True),
+                    html.Button("Refresh JazzHR", id="refresh-jazzhr-btn", className="refresh-btn", n_clicks=0),
+                    html.Button("Refresh CI", id="refresh-btn", className="refresh-btn", n_clicks=0),
+                    html.A("Logout", href="/logout", className="refresh-btn", style={"marginLeft": "12px", "textDecoration": "none", "display": "flex", "alignItems": "center"}),
+                ], className="header-right"),
+            ], className="header"),
         
-        # Main Content
         html.Div([
             html.Div([
                 html.Div([
@@ -775,7 +754,6 @@ app.layout = html.Div([
         
     ], className="app-container"),
     
-    # State stores
     dcc.Store(id="current-page", data=1),
     dcc.Store(id="search-query", data=""),
     dcc.Store(id="current-surveys-data", data=[]),
@@ -784,12 +762,12 @@ app.layout = html.Div([
     dcc.Store(id="upload-results", data={}),
     dcc.Store(id="refresh-trigger", data=0),
     
-    # Intervals (configurable via .env)
     dcc.Interval(id="poll-interval", interval=POLL_INTERVAL_MS, n_intervals=0),
     dcc.Interval(id="upload-interval", interval=UPLOAD_INTERVAL_MS, n_intervals=0, disabled=True),
-])
+    ])
 
-# HELPER FUNCTION - BUILD SURVEY DISPLAY
+app.layout = serve_layout
+
 def build_survey_display(surveys: List[Dict], jazzhr_results: Dict, pdf_sizes: Dict) -> Tuple[List, List, List]:
     """Build survey display elements. Returns (survey_items, uploadable_ids, surveys_data)."""
     survey_items = []
@@ -819,7 +797,6 @@ def build_survey_display(surveys: List[Dict], jazzhr_results: Dict, pdf_sizes: D
             "pdf_url": url
         })
         
-        # Build status indicator
         if status is None:
             status_indicator = html.Div([html.Span("Checking...", className="status-text")], className="status-pending")
         elif is_uploaded:
@@ -842,7 +819,6 @@ def build_survey_display(surveys: List[Dict], jazzhr_results: Dict, pdf_sizes: D
         position = s.get('position', '').strip()
         trait_pattern = s.get('traitPattern', 'N/A')
         
-        # Build card
         card_children = [
             html.Div([
                 html.Div([
@@ -885,11 +861,9 @@ def build_survey_display(surveys: List[Dict], jazzhr_results: Dict, pdf_sizes: D
     
     return survey_items, uploadable_ids, surveys_data
 
-# Callback lock to prevent race conditions
 _callback_lock = Lock()
 _last_render_result = None
 
-# CALLBACK 1: Main Display (triggered by page/search/refresh/interval)
 @callback(
     [Output("surveys-container", "children"),
      Output("page-info", "children"),
@@ -906,17 +880,9 @@ _last_render_result = None
     prevent_initial_call=False
 )
 def display_surveys(page, search_query, refresh_trigger, n_intervals):
-    """
-    Display surveys - main callback that renders the survey list.
-    
-    Architecture:
-    - Each Gunicorn worker loads surveys independently (lazy loading)
-    - First request triggers CSV download (~3s), subsequent requests are fast
-    - JazzHR status is checked in background after initial load
-    """
+    """Main callback that renders the survey list."""
     global _last_render_result
     
-    # Try to acquire lock - if another callback is running, return cached result
     acquired = _callback_lock.acquire(blocking=False)
     if not acquired:
         if _last_render_result:
@@ -934,22 +900,18 @@ def display_surveys(page, search_query, refresh_trigger, n_intervals):
         except (AttributeError, RuntimeError):
             triggered_id = None
         
-        # Ensure page is valid
         if page is None or page < 1:
             page = 1
         
-        # LAZY LOADING: Load surveys if not already loaded in this worker
         if not survey_service.is_loaded():
             log(f"First request - loading surveys (trigger={triggered_id})", "WARN")
             try:
                 survey_service.load_surveys(force_refresh=False)
-                # Update smart cache with recent survey IDs
                 all_surveys = survey_service.get_all_surveys()
                 if all_surveys:
                     recent_ids = [str(s['surveyId']) for s in all_surveys[:RECENT_SURVEY_THRESHOLD]]
                     jazzhr_cache.set_recent_surveys(recent_ids)
                     log(f"Worker initialized with {len(all_surveys)} surveys", "WARN")
-                    # Start background JazzHR checker for this worker
                     background_checker.start_checking()
             except Exception as e:
                 log(f"Failed to load surveys: {e}", "ERROR")
@@ -961,7 +923,6 @@ def display_surveys(page, search_query, refresh_trigger, n_intervals):
                 _last_render_result = result
                 return result
         
-        # If still not loaded after attempt, return error
         if not survey_service.is_loaded():
             result = (
                 [html.Div("Failed to load survey data", className="empty-message")],
@@ -971,7 +932,6 @@ def display_surveys(page, search_query, refresh_trigger, n_intervals):
             _last_render_result = result
             return result
         
-        # Get surveys
         if search_query and len(search_query) >= 2:
             all_results = survey_service.search_surveys(search_query, limit=100)
             total_count = len(all_results)
@@ -992,20 +952,13 @@ def display_surveys(page, search_query, refresh_trigger, n_intervals):
             _last_render_result = result
             return result
         
-        # Get JazzHR status - use cache-only for fast initial render
         urls = {str(s['surveyId']): s.get('surveyReportUrl') for s in surveys}
         
-        # Use fast path (cache-only) for interval triggers and initial load
-        # Only do full checks on explicit refresh button click (refresh-trigger input)
         if triggered_id == "refresh-trigger":
-            # Slow path: full checks only on explicit refresh button click
             urls_to_check = {sid: url for sid, url in urls.items() if url}
             pdf_sizes = fetch_pdf_sizes(urls_to_check, pdf_size_cache)
             jazzhr_results = jazzhr_service.check_surveys_batch(surveys, urls, pdf_sizes)
         else:
-            # Fast path: cache-only for interval updates, initial load, page changes, search, etc.
-            # Background checker handles JazzHR updates
-            # Use batch retrieval for much faster performance (single Redis call vs 15+)
             pdf_sizes = {}
             survey_ids = [str(s['surveyId']) for s in surveys]
             cached_batch = jazzhr_cache.get_batch(survey_ids)
@@ -1015,10 +968,8 @@ def display_surveys(page, search_query, refresh_trigger, n_intervals):
                 if cached:
                     jazzhr_results[survey_id] = cached
                 else:
-                    # Default to checking status for uncached items
                     jazzhr_results[survey_id] = {"status": None, "isUploaded": False}
         
-        # Build display
         try:
             survey_items, uploadable_ids, surveys_data = build_survey_display(surveys, jazzhr_results, pdf_sizes)
             log(f"Built display: {len(survey_items)} items, {len(uploadable_ids)} uploadable", "WARN")
@@ -1030,12 +981,10 @@ def display_surveys(page, search_query, refresh_trigger, n_intervals):
             uploadable_ids = []
             surveys_data = []
         
-        # Ensure survey_items is always a valid list
         if not survey_items or len(survey_items) == 0:
             log(f"WARNING: No survey items generated for page {page}, surveys count: {len(surveys)}, jazzhr_results count: {len(jazzhr_results)}", "WARN")
             survey_items = [html.Div("No surveys to display", className="empty-message")]
         
-        # Ensure survey_items is a list (not None, not empty tuple, etc.)
         if not isinstance(survey_items, list):
             log(f"ERROR: survey_items is not a list: {type(survey_items)}", "ERROR")
             survey_items = [html.Div("Error: Invalid survey data format", className="empty-message")]
@@ -1074,7 +1023,30 @@ def display_surveys(page, search_query, refresh_trigger, n_intervals):
     finally:
         _callback_lock.release()
 
-# CALLBACK 2: Pagination (prev/next buttons)
+@callback(
+    [Output("login-url", "pathname"),
+     Output("login-error-message", "children"),
+     Output("login-error-message", "style")],
+    [Input("login-submit-btn", "n_clicks"),
+     Input("login-username-input", "n_submit"),
+     Input("login-password-input", "n_submit")],
+    [State("login-username-input", "value"),
+     State("login-password-input", "value")],
+    prevent_initial_call=True
+)
+def handle_login_callback(n_clicks, username_submit, password_submit, username, password):
+    """Handle login form submission via Dash callback"""
+    if not current_user.is_authenticated:
+        if username and password:
+            success, message = auth_manager.attempt_login(username, password)
+            if success:
+                return "/", "", {"display": "none"}
+            else:
+                return dash.no_update, message, {"display": "block"}
+        else:
+            return dash.no_update, "Please enter both username and password", {"display": "block"}
+    return "/", "", {"display": "none"}
+
 @callback(
     Output("current-page", "data"),
     [Input("prev-page-btn", "n_clicks"),
@@ -1083,7 +1055,6 @@ def display_surveys(page, search_query, refresh_trigger, n_intervals):
     prevent_initial_call=True
 )
 def handle_pagination(prev_clicks, next_clicks, current_page):
-    """Handle pagination buttons."""
     triggered_id = ctx.triggered_id
     
     if triggered_id == "prev-page-btn":
@@ -1093,7 +1064,6 @@ def handle_pagination(prev_clicks, next_clicks, current_page):
     
     return dash.no_update
 
-# CALLBACK 3: Search (input and clear button)
 @callback(
     [Output("search-query", "data"),
      Output("current-page", "data", allow_duplicate=True),
@@ -1103,7 +1073,6 @@ def handle_pagination(prev_clicks, next_clicks, current_page):
     prevent_initial_call=True
 )
 def handle_search(search_value, clear_clicks):
-    """Handle search input and clear button."""
     triggered_id = ctx.triggered_id
     
     if triggered_id == "clear-search-btn":
@@ -1113,7 +1082,6 @@ def handle_search(search_value, clear_clicks):
     
     return dash.no_update, dash.no_update, dash.no_update
 
-# CALLBACK 4: Refresh CI Button
 @callback(
     [Output("refresh-trigger", "data", allow_duplicate=True),
      Output("search-query", "data", allow_duplicate=True),
@@ -1124,7 +1092,6 @@ def handle_search(search_value, clear_clicks):
     prevent_initial_call=True
 )
 def handle_refresh_ci(n_clicks, current_trigger):
-    """Handle Refresh CI button - reload CSV."""
     if not n_clicks:
         return dash.no_update, dash.no_update, dash.no_update, dash.no_update
     
@@ -1146,7 +1113,6 @@ def handle_refresh_ci(n_clicks, current_trigger):
     
     return current_trigger + 1, "", 1, ""
 
-# CALLBACK 5: Refresh JazzHR Button
 @callback(
     Output("refresh-trigger", "data", allow_duplicate=True),
     Input("refresh-jazzhr-btn", "n_clicks"),
@@ -1155,7 +1121,6 @@ def handle_refresh_ci(n_clicks, current_trigger):
     prevent_initial_call=True
 )
 def handle_refresh_jazzhr(n_clicks, surveys_data, current_trigger):
-    """Handle Refresh JazzHR button - clear cache for visible surveys."""
     if not n_clicks:
         return dash.no_update
     
@@ -1172,7 +1137,6 @@ def handle_refresh_jazzhr(n_clicks, surveys_data, current_trigger):
     
     return current_trigger + 1
 
-# CALLBACK 6: Select All Checkbox
 @callback(
     Output({"type": "survey-checkbox", "index": ALL}, "value"),
     Input("select-all-checkbox", "value"),
@@ -1181,7 +1145,6 @@ def handle_refresh_jazzhr(n_clicks, surveys_data, current_trigger):
     prevent_initial_call=True
 )
 def handle_select_all(select_all_value, uploadable_ids, checkbox_ids):
-    """Handle select all checkbox."""
     if not checkbox_ids:
         return []
     
@@ -1190,7 +1153,6 @@ def handle_select_all(select_all_value, uploadable_ids, checkbox_ids):
     else:
         return [[] for _ in checkbox_ids]
 
-# CALLBACK 7: Selection Count
 @callback(
     [Output("upload-btn", "disabled"),
      Output("selection-count", "children")],
@@ -1198,7 +1160,6 @@ def handle_select_all(select_all_value, uploadable_ids, checkbox_ids):
     prevent_initial_call=True
 )
 def update_selection_count(checkbox_values):
-    """Update selection count and upload button state."""
     selected = [v[0] for v in checkbox_values if v]
     count = len(selected)
     
@@ -1209,7 +1170,6 @@ def update_selection_count(checkbox_values):
     else:
         return False, f"({count} selected)"
 
-# CALLBACK 8: Upload Selected Button
 @callback(
     [Output("upload-queue", "data", allow_duplicate=True),
      Output("upload-results", "data", allow_duplicate=True),
@@ -1222,7 +1182,6 @@ def update_selection_count(checkbox_values):
     prevent_initial_call=True
 )
 def handle_upload_selected(n_clicks, checkbox_values, surveys_data, existing_queue):
-    """Handle Upload Selected button."""
     if not n_clicks or existing_queue:
         return dash.no_update, dash.no_update, dash.no_update, dash.no_update
     
@@ -1251,7 +1210,6 @@ def handle_upload_selected(n_clicks, checkbox_values, surveys_data, existing_que
     
     return queue, {}, False, f"Uploading 0/{len(queue)}..."
 
-# CALLBACK 9: Single Upload Button
 @callback(
     [Output("upload-queue", "data", allow_duplicate=True),
      Output("upload-results", "data", allow_duplicate=True),
@@ -1263,8 +1221,6 @@ def handle_upload_selected(n_clicks, checkbox_values, surveys_data, existing_que
     prevent_initial_call=True
 )
 def handle_single_upload(n_clicks_list, surveys_data, existing_queue):
-    """Handle individual upload button clicks."""
-    # Get which button was clicked
     triggered = ctx.triggered
     if not triggered or not triggered[0]:
         return dash.no_update, dash.no_update, dash.no_update, dash.no_update
@@ -1273,11 +1229,9 @@ def handle_single_upload(n_clicks_list, surveys_data, existing_queue):
     if ".n_clicks" not in trigger_prop_id:
         return dash.no_update, dash.no_update, dash.no_update, dash.no_update
     
-    # Don't start new upload if one is in progress
     if existing_queue:
         return dash.no_update, dash.no_update, dash.no_update, "Upload in progress"
     
-    # Parse button index
     try:
         prop_id_without_suffix = trigger_prop_id.replace(".n_clicks", "")
         triggered_id_dict = json.loads(prop_id_without_suffix)
@@ -1288,12 +1242,10 @@ def handle_single_upload(n_clicks_list, surveys_data, existing_queue):
     if not survey_id:
         return dash.no_update, dash.no_update, dash.no_update, dash.no_update
     
-    # Verify click happened (not just initialization)
     has_click = any(c and c > 0 for c in (n_clicks_list or []))
     if not has_click:
         return dash.no_update, dash.no_update, dash.no_update, dash.no_update
     
-    # Find survey data
     survey_data = next((s for s in surveys_data if str(s.get("surveyId")) == survey_id), None)
     if not survey_data or not survey_data.get("applicant_id") or not survey_data.get("pdf_url"):
         return dash.no_update, dash.no_update, dash.no_update, "Survey data not found"
@@ -1309,7 +1261,6 @@ def handle_single_upload(n_clicks_list, surveys_data, existing_queue):
     name = f"{survey_data.get('firstName', '')} {survey_data.get('lastName', '')}".strip()
     return queue, {}, False, f"Uploading {name}..."
 
-# CALLBACK 10: Process Upload Queue
 @callback(
     [Output("upload-queue", "data", allow_duplicate=True),
      Output("upload-results", "data", allow_duplicate=True),
@@ -1324,12 +1275,10 @@ def handle_single_upload(n_clicks_list, surveys_data, existing_queue):
 )
 def process_upload_queue(n_intervals, queue, results, refresh_trigger):
     """Process upload queue one item at a time."""
-    # Skip first interval (prevents stale queue processing)
     if n_intervals is None or n_intervals <= 1:
         return dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update
     
     if not queue:
-        # Done
         if results:
             success_count = sum(1 for r in results.values() if r.get("success"))
             fail_count = len(results) - success_count
@@ -1337,9 +1286,8 @@ def process_upload_queue(n_intervals, queue, results, refresh_trigger):
             if fail_count > 0:
                 msg += f", {fail_count} failed"
             return [], results, True, msg, refresh_trigger + 1
-        return [], results, True, "", dash.no_update
+            return [], results, True, "", dash.no_update
     
-    # Process first item
     current = queue[0]
     remaining = queue[1:]
     survey_id = str(current["survey_id"])
