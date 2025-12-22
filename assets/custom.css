@@ -293,7 +293,7 @@ body {
 /* Checkbox overlay on right side, below header - doesn't affect layout */
 .survey-checkbox-overlay-container {
     position: absolute;
-    top: 70px;
+    top: 82px;
     right: 28px;
     z-index: 20;
     display: flex !important;
