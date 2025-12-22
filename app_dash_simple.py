@@ -1,3 +1,4 @@
+
 import os
 import sys
 import time
@@ -136,39 +137,46 @@ class SimpleSurveyService:
         
         return surveys
     
-    def load_surveys(self, force_refresh: bool = False, wait_if_loading: bool = True) -> List[Dict]:
-        """Load all surveys from CSV."""
+    def load_surveys(self, force_refresh: bool = False) -> List[Dict]:
+        """
+        Load all surveys from CSV.
+        
+        This is designed for multi-process environments (Gunicorn):
+        - Each worker loads data independently (no shared memory)
+        - Uses simple locking to prevent concurrent loads within same process
+        - Blocking call - waits for load to complete
+        """
         with self._lock:
+            # Already loaded and not forcing refresh
             if self._is_loaded and not force_refresh:
                 return self._all_surveys
+            
+            # Another thread in THIS process is loading - wait for it
             if self._is_loading:
-                if wait_if_loading:
-                    # Wait for loading to complete (another thread is loading)
-                    log("Another thread is loading surveys - waiting...", "WARN")
-                else:
-                    return self._all_surveys
+                pass  # Fall through to wait loop below
             else:
+                # We'll do the loading
                 self._is_loading = True
         
-        # If another thread is loading, wait for it to complete
-        if wait_if_loading:
-            max_wait = 30  # seconds
-            waited = 0
-            while self._is_loading and not self._is_loaded and waited < max_wait:
-                time.sleep(0.5)
-                waited += 0.5
-            if self._is_loaded:
-                log(f"Loading completed by another thread (waited {waited:.1f}s)", "WARN")
-                return self._all_surveys
-            # If still not loaded after waiting, try loading ourselves
+        # Wait for loading to complete (if another thread started it)
+        # This only works within the same process - each Gunicorn worker is independent
+        max_wait = 60  # seconds
+        waited = 0
+        while waited < max_wait:
             with self._lock:
+                if self._is_loaded:
+                    log(f"Data ready (waited {waited:.1f}s)", "WARN")
+                    return self._all_surveys
                 if not self._is_loading:
+                    # Previous loader failed/finished without success, we take over
                     self._is_loading = True
-                else:
-                    return self._all_surveys  # Another thread is still loading
+                    break
+            time.sleep(0.5)
+            waited += 0.5
         
+        # Either we're the loader, or timeout reached - try loading
         try:
-            log("Downloading fresh CSV data...", "WARN")
+            log("Downloading CSV data...", "WARN")
             start = time.time()
             client = self._get_client()
             csv_data = client.export_surveys_csv(client_id=self.client_id)
@@ -179,14 +187,14 @@ class SimpleSurveyService:
                 self._is_loaded = True
                 self._is_loading = False
             
-            log(f"Loaded {len(surveys)} surveys from CSV in {time.time()-start:.1f}s", "WARN")
+            log(f"Loaded {len(surveys)} surveys in {time.time()-start:.1f}s", "WARN")
             return surveys
             
         except Exception as e:
             log(f"Failed to load surveys: {e}", "ERROR")
             with self._lock:
                 self._is_loading = False
-            return self._all_surveys
+            raise  # Re-raise so caller knows it failed
     
     def is_loaded(self) -> bool:
         return self._is_loaded
@@ -612,22 +620,11 @@ else:
 jazzhr_service = SimpleJazzHRService(api_key=jazzhr_api_key, cache=jazzhr_cache, max_workers=6)
 background_checker = BackgroundJazzHRChecker(survey_service, jazzhr_service, pdf_size_cache)
 
-# Load surveys on startup
-log("Starting app - loading surveys from CSV...", "WARN")
-
-def _background_csv_load():
-    try:
-        survey_service.load_surveys(force_refresh=True, wait_if_loading=False)
-        # Update smart cache with recent survey IDs (for TTL handling)
-        all_surveys = survey_service.get_all_surveys()
-        recent_ids = [str(s['surveyId']) for s in all_surveys[:RECENT_SURVEY_THRESHOLD]]
-        jazzhr_cache.set_recent_surveys(recent_ids)
-        log(f"Set {len(recent_ids)} surveys as 'recent' (24h TTL), older surveys use permanent cache", "WARN")
-        background_checker.start_checking()
-    except Exception as e:
-        log(f"Background CSV load error: {e}", "ERROR")
-
-Thread(target=_background_csv_load, daemon=True, name="CSVLoader").start()
+# NOTE: Do NOT load surveys here at module level!
+# Gunicorn forks workers AFTER module import, so any background threads
+# or loaded data here would be lost/duplicated in workers.
+# Instead, surveys are loaded lazily on first request in each worker.
+log("App module loaded - surveys will load on first request", "WARN")
 
 # DASH APP
 app = Dash(__name__, suppress_callback_exceptions=True)
@@ -926,22 +923,26 @@ _last_render_result = None
     prevent_initial_call=False
 )
 def display_surveys(page, search_query, refresh_trigger, n_intervals):
-    """Display surveys - simple rendering, always returns content."""
+    """
+    Display surveys - main callback that renders the survey list.
+    
+    Architecture:
+    - Each Gunicorn worker loads surveys independently (lazy loading)
+    - First request triggers CSV download (~3s), subsequent requests are fast
+    - JazzHR status is checked in background after initial load
+    """
     global _last_render_result
     
     # Try to acquire lock - if another callback is running, return cached result
     acquired = _callback_lock.acquire(blocking=False)
     if not acquired:
-        # Another callback is in progress - return last result or loading
         if _last_render_result:
-            log("Callback skipped - another in progress, using cached result", "WARN")
             return _last_render_result
-        else:
-            return (
-                [html.Div("Loading surveys...", className="empty-message")],
-                "Loading...", True, True, "Loading data...",
-                [], [], {"display": "block"}
-            )
+        return (
+            [html.Div("Loading surveys...", className="empty-message")],
+            "Loading...", True, True, "Loading data...",
+            [], [], {"display": "block"}
+        )
     
     try:
         start_time = time.time()
@@ -949,37 +950,43 @@ def display_surveys(page, search_query, refresh_trigger, n_intervals):
             triggered_id = ctx.triggered_id
         except (AttributeError, RuntimeError):
             triggered_id = None
-        is_loaded = survey_service.is_loaded()
-        
-        # Debug logging
-        log(f"display_surveys called: page={page}, search={search_query}, trigger={triggered_id}, loaded={is_loaded}", "WARN")
         
         # Ensure page is valid
         if page is None or page < 1:
             page = 1
         
-        # If not loaded, trigger loading NOW (handles multi-worker scenarios on Render)
-        if not is_loaded:
-            log("Surveys not loaded in this worker - loading/waiting...", "WARN")
-            survey_service.load_surveys(force_refresh=False, wait_if_loading=True)
-            # Update smart cache with recent survey IDs
-            all_surveys = survey_service.get_all_surveys()
-            if all_surveys:
-                recent_ids = [str(s['surveyId']) for s in all_surveys[:RECENT_SURVEY_THRESHOLD]]
-                jazzhr_cache.set_recent_surveys(recent_ids)
-                log(f"Worker loaded {len(all_surveys)} surveys", "WARN")
-                # Start background JazzHR checker for this worker
-                background_checker.start_checking()
-                is_loaded = True  # Update local flag
-            else:
-                # Still not loaded - return loading message
+        # LAZY LOADING: Load surveys if not already loaded in this worker
+        if not survey_service.is_loaded():
+            log(f"First request - loading surveys (trigger={triggered_id})", "WARN")
+            try:
+                survey_service.load_surveys(force_refresh=False)
+                # Update smart cache with recent survey IDs
+                all_surveys = survey_service.get_all_surveys()
+                if all_surveys:
+                    recent_ids = [str(s['surveyId']) for s in all_surveys[:RECENT_SURVEY_THRESHOLD]]
+                    jazzhr_cache.set_recent_surveys(recent_ids)
+                    log(f"Worker initialized with {len(all_surveys)} surveys", "WARN")
+                    # Start background JazzHR checker for this worker
+                    background_checker.start_checking()
+            except Exception as e:
+                log(f"Failed to load surveys: {e}", "ERROR")
                 result = (
-                    [html.Div("Loading surveys...", className="empty-message")],
-                    "Loading...", True, True, "Loading data...",
-                    [], [], {"display": "block"}
+                    [html.Div(f"Error loading surveys: {str(e)}", className="empty-message")],
+                    "Error", True, True, f"Error: {str(e)[:50]}",
+                    [], [], {"display": "none"}
                 )
                 _last_render_result = result
                 return result
+        
+        # If still not loaded after attempt, return error
+        if not survey_service.is_loaded():
+            result = (
+                [html.Div("Failed to load survey data", className="empty-message")],
+                "Error", True, True, "Load failed",
+                [], [], {"display": "none"}
+            )
+            _last_render_result = result
+            return result
         
         # Get surveys
         if search_query and len(search_query) >= 2:
@@ -1142,8 +1149,15 @@ def handle_refresh_ci(n_clicks, current_trigger):
     background_checker.stop_checking()
     
     def _reload():
-        survey_service.load_surveys(force_refresh=True, wait_if_loading=False)
-        background_checker.start_checking()
+        try:
+            survey_service.load_surveys(force_refresh=True)
+            all_surveys = survey_service.get_all_surveys()
+            if all_surveys:
+                recent_ids = [str(s['surveyId']) for s in all_surveys[:RECENT_SURVEY_THRESHOLD]]
+                jazzhr_cache.set_recent_surveys(recent_ids)
+            background_checker.start_checking()
+        except Exception as e:
+            log(f"Refresh CI error: {e}", "ERROR")
     
     Thread(target=_reload, daemon=True).start()
     
