@@ -13,10 +13,10 @@ from dash import Dash, html, dcc, Input, Output, State, callback, ctx, ALL
 import dash
 from dotenv import load_dotenv
 
-from cultureindex_client import CultureIndexClient
+from cultureindex_client_1 import CultureIndexClient
 from surveys_fetch import format_phone_number
 from check_jazzhr_uploads import JazzHRUploadChecker
-from cache_storage import create_cache, SmartJazzHRCache
+from cache_storage_1 import create_cache, SmartJazzHRCache
 
 load_dotenv()
 
@@ -141,40 +141,23 @@ class SimpleSurveyService:
         """
         Load all surveys from CSV.
         
-        This is designed for multi-process environments (Gunicorn):
-        - Each worker loads data independently (no shared memory)
-        - Uses simple locking to prevent concurrent loads within same process
-        - Blocking call - waits for load to complete
+        Simple synchronous loading for multi-process environments (Gunicorn).
+        Each worker loads independently on first request (~3s).
         """
         with self._lock:
             # Already loaded and not forcing refresh
             if self._is_loaded and not force_refresh:
                 return self._all_surveys
             
-            # Another thread in THIS process is loading - wait for it
+            # Already loading in another thread in THIS worker - return what we have
             if self._is_loading:
-                pass  # Fall through to wait loop below
-            else:
-                # We'll do the loading
-                self._is_loading = True
+                log("Another thread is loading, returning current data", "WARN")
+                return self._all_surveys
+            
+            # We'll do the loading
+            self._is_loading = True
         
-        # Wait for loading to complete (if another thread started it)
-        # This only works within the same process - each Gunicorn worker is independent
-        max_wait = 60  # seconds
-        waited = 0
-        while waited < max_wait:
-            with self._lock:
-                if self._is_loaded:
-                    log(f"Data ready (waited {waited:.1f}s)", "WARN")
-                    return self._all_surveys
-                if not self._is_loading:
-                    # Previous loader failed/finished without success, we take over
-                    self._is_loading = True
-                    break
-            time.sleep(0.5)
-            waited += 0.5
-        
-        # Either we're the loader, or timeout reached - try loading
+        # Load the data
         try:
             log("Downloading CSV data...", "WARN")
             start = time.time()
