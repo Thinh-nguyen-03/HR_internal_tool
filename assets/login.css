@@ -1,0 +1,257 @@
+/* Login Page Styles - Matching SEnergy Client Portal Design */
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+
+:root {
+    --gold: #f4b000;
+    --ink: #ffffff;
+    --muted: #9fb2c8;
+    --card: rgba(31, 41, 55, 0.85);
+    --card-stroke: rgba(42, 54, 71, 0.8);
+    --radius: 12px;
+    --shadow: 0 20px 50px rgba(0, 0, 0, 0.4), 0 1px 3px rgba(0, 0, 0, 0.2);
+    --bg-dark: #0f1236;
+}
+
+/* Login page specific overrides */
+body.login-page {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 32px;
+    position: relative;
+    overflow: hidden;
+    min-height: 100vh;
+    height: 100%;
+}
+
+body.login-page::after {
+    content: "";
+    position: absolute;
+    inset: -20%;
+    background: radial-gradient(1000px 700px at 40% 60%, rgba(0, 0, 0, 0.35), transparent 70%);
+    pointer-events: none;
+    z-index: 0;
+}
+
+.login-container {
+    position: relative;
+    z-index: 1;
+    width: 100%;
+    max-width: 760px;
+}
+
+.login-stack {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 18px;
+    margin-bottom: 14px;
+}
+
+.login-logo {
+    height: 56px;
+    width: auto;
+    filter: drop-shadow(0 6px 24px rgba(0, 0, 0, 0.45));
+}
+
+.login-title {
+    font-size: 28px;
+    font-weight: 800;
+    letter-spacing: -0.2px;
+    color: #ffffff;
+}
+
+.login-subtitle {
+    color: var(--muted);
+    font-size: 14px;
+}
+
+.login-card {
+    margin: 8px auto 0;
+    width: 100%;
+    max-width: 520px;
+    background: var(--card);
+    border: 1px solid var(--card-stroke);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    backdrop-filter: blur(6px) saturate(1.1);
+    padding: 26px;
+}
+
+.login-field {
+    margin-top: 16px;
+}
+
+.login-field:first-child {
+    margin-top: 0;
+}
+
+.login-label {
+    display: block;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    color: #cbd5e1;
+    margin-bottom: 8px;
+}
+
+.login-input-wrapper {
+    position: relative;
+}
+
+.login-input-wrapper input {
+    width: 100%;
+    height: 46px;
+    border-radius: 10px;
+    border: 1px solid #2a3647;
+    background: #1f2937;
+    color: var(--ink);
+    padding: 0 14px 0 46px;
+    font-size: 15px;
+    font-family: 'Inter', sans-serif;
+    transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.login-input-wrapper input::placeholder {
+    color: #8b9bb0;
+}
+
+.login-input-wrapper input:hover {
+    background: #243142;
+}
+
+.login-input-wrapper input:focus {
+    outline: none;
+    border-color: #3a4a63;
+    background: #243142;
+    box-shadow: 0 0 0 3px rgba(244, 176, 0, 0.18);
+}
+
+.login-icon {
+    position: absolute;
+    left: 14px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 20px;
+    height: 20px;
+    color: #9fb2c8;
+    opacity: 0.9;
+    pointer-events: none;
+    background-size: contain;
+    background-repeat: no-repeat;
+    background-position: center;
+}
+
+.login-icon-email {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%239fb2c8' d='M20 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2Zm0 4-8 5L4 8V6l8 5 8-5v2Z'/%3E%3C/svg%3E");
+}
+
+.login-icon-lock {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%239fb2c8' d='M12 1a5 5 0 0 0-5 5v3H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2h-1V6a5 5 0 0 0-5-5Zm3 8H9V6a3 3 0 0 1 6 0v3Zm-3 4a2 2 0 0 1 1 3.732V18a1 1 0 0 1-2 0v-1.268A2 2 0 0 1 12 13Z'/%3E%3C/svg%3E");
+}
+
+.login-btn {
+    margin-top: 18px;
+    width: 100%;
+    height: 48px;
+    border: 0;
+    border-radius: 10px;
+    background: linear-gradient(180deg, var(--gold), #f0aa00);
+    color: #111827;
+    font-weight: 800;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+    font-family: 'Inter', sans-serif;
+    box-shadow: 0 18px 40px rgba(244, 176, 0, 0.35), 0 1px 0 rgba(255, 255, 255, 0.08) inset;
+    cursor: pointer;
+    transition: filter 0.15s ease, transform 0.04s ease;
+}
+
+.login-btn:hover {
+    filter: brightness(0.98) drop-shadow(0 10px 30px rgba(244, 176, 0, 0.28));
+}
+
+.login-btn:active {
+    transform: translateY(1px);
+}
+
+.login-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.login-error {
+    margin-bottom: 16px;
+    background: #3b1e1e;
+    color: #ffd5d2;
+    border: 1px solid #5a2b2b;
+    border-radius: 10px;
+    padding: 10px 12px;
+    font-size: 14px;
+}
+
+.login-footer {
+    text-align: center;
+    margin-top: 18px;
+    color: #8aa0b8;
+    font-size: 12px;
+}
+
+.login-footer strong {
+    color: #c9d6e5;
+}
+
+/* Make Dash inputs work with login styles */
+#login-username-input,
+#login-password-input {
+    width: 100% !important;
+    height: 46px !important;
+    border-radius: 10px !important;
+    border: 1px solid #2a3647 !important;
+    background: #1f2937 !important;
+    color: var(--ink) !important;
+    padding: 0 14px 0 46px !important;
+    font-size: 15px !important;
+    font-family: 'Inter', sans-serif !important;
+}
+
+#login-username-input::placeholder,
+#login-password-input::placeholder {
+    color: #8b9bb0 !important;
+}
+
+#login-username-input:hover,
+#login-password-input:hover {
+    background: #243142 !important;
+}
+
+#login-username-input:focus,
+#login-password-input:focus {
+    outline: none !important;
+    border-color: #3a4a63 !important;
+    background: #243142 !important;
+    box-shadow: 0 0 0 3px rgba(244, 176, 0, 0.18) !important;
+}
+
+@media (max-width: 520px) {
+    .login-title {
+        font-size: 24px;
+    }
+    
+    .login-card {
+        padding: 22px;
+    }
+}
+
+/* Override any conflicting Dash styles */
+._dash-loading {
+    display: none !important;
+}
+
+/* Hide Dash's default loading overlay on login page */
+#_pages_content ._dash-loading {
+    display: none !important;
+}
+
