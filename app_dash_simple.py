@@ -15,10 +15,10 @@ from dotenv import load_dotenv
 from flask import redirect, request, session
 from flask_login import current_user, logout_user
 
-from cultureindex_client_1 import CultureIndexClient
+from cultureindex_client import CultureIndexClient
 from surveys_fetch import format_phone_number
 from check_jazzhr_uploads import JazzHRUploadChecker
-from cache_storage_1 import create_cache, SmartJazzHRCache
+from cache_storage import create_cache, SmartJazzHRCache
 from auth import AuthManager
 from login_layout import create_login_layout
 
