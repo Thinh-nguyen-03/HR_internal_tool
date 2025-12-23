@@ -1,17 +1,10 @@
-"""
-Login page layout for HR Tool
-"""
 from dash import html, dcc
 
-
 def create_login_layout(error_message=None):
-    """Create the login page layout matching the SEnergy design"""
     return html.Div([
-        # Body class injection for login-specific styles
         html.Div(id='login-body-class', style={'display': 'none'}),
         
         html.Div([
-            # Logo and title stack
             html.Div([
                 html.Img(
                     src="/assets/SENERGY-Logo_Icon-Yellow.png",
@@ -21,9 +14,7 @@ def create_login_layout(error_message=None):
                 html.Div("HR INTERNAL TOOL", className="login-title"),
             ], className="login-stack"),
             
-            # Login card
             html.Div([
-                # Error message (only show if there's an error)
                 html.Div(
                     error_message or "",
                     id="login-error-message",
@@ -31,13 +22,10 @@ def create_login_layout(error_message=None):
                     style={"display": "block" if error_message else "none"}
                 ),
                 
-                # Login form
                 html.Div([
-                    # Username field
                     html.Div([
                         html.Label("Username", htmlFor="login-username-input", className="login-label"),
                         html.Div([
-                            # Email icon - using CSS background
                             html.Div(className="login-icon login-icon-email"),
                             
                             dcc.Input(
@@ -51,11 +39,9 @@ def create_login_layout(error_message=None):
                         ], className="login-input-wrapper"),
                     ], className="login-field"),
                     
-                    # Password field
                     html.Div([
                         html.Label("Password", htmlFor="login-password-input", className="login-label"),
                         html.Div([
-                            # Lock icon - using CSS background
                             html.Div(className="login-icon login-icon-lock"),
                             
                             dcc.Input(
@@ -69,7 +55,6 @@ def create_login_layout(error_message=None):
                         ], className="login-input-wrapper"),
                     ], className="login-field"),
                     
-                    # Login button
                     html.Button(
                         "Sign In",
                         id="login-submit-btn",
@@ -79,7 +64,6 @@ def create_login_layout(error_message=None):
                 ]),
             ], className="login-card"),
             
-            # Footer
             html.Div([
                 html.Span("Powered by "),
                 html.Strong("Schneider Engineering")
@@ -87,7 +71,6 @@ def create_login_layout(error_message=None):
             
         ], className="login-container"),
         
-        # Hidden components for state management
         dcc.Location(id='login-url', refresh=True),
         dcc.Store(id='login-attempts-store', data=0),
     ], style={
