@@ -88,9 +88,24 @@ class FileCache(CacheBackend):
     
     def get_batch(self, keys: List[str]) -> Dict[str, Optional[Dict]]:
         result = {}
+        now = datetime.now()
+        ttl_delta = timedelta(hours=self.ttl_hours)
         with self._lock:
             for key in keys:
-                result[key] = self.get(key)
+                item = self._cache.get(key)
+                if item:
+                    # Permanent items never expire
+                    if item.get('_permanent'):
+                        result[key] = item
+                    else:
+                        # Check TTL for non-permanent items
+                        timestamp = item.get('timestamp', datetime.min)
+                        if now - timestamp < ttl_delta:
+                            result[key] = item
+                        else:
+                            result[key] = None
+                else:
+                    result[key] = None
         return result
     
     def get_permanent(self, key: str) -> Optional[Dict]:
@@ -450,3 +465,4 @@ class SmartJazzHRCache:
         if hasattr(self.cache, 'is_healthy'):
             return self.cache.is_healthy()
         return {"connected": True, "type": "file"}
+
