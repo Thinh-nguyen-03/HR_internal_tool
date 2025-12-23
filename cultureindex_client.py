@@ -29,18 +29,20 @@ logging.basicConfig(
 log = logging.getLogger("cultureindex")
 
 class CultureIndexAuthError(Exception):
+    """Raised when authentication fails or token is invalid."""
     pass
 
 class CultureIndexAPIError(Exception):
+    """Raised when API request fails."""
     pass
 
 @dataclass(frozen=True)
 class CultureIndexConfig:
+    """Configuration for Culture Index API client."""
     base_url: str = DEFAULT_BASE_URL
     timeout: tuple[int, int] = DEFAULT_TIMEOUT
 
 class CultureIndexClient:
-    
     def __init__(
         self,
         config: Optional[CultureIndexConfig] = None,
