@@ -1,4 +1,3 @@
-
 import os
 import sys
 import time
@@ -39,8 +38,7 @@ POLL_INTERVAL_MS = int(os.getenv('POLL_INTERVAL_MS', '15000'))
 UPLOAD_INTERVAL_MS = int(os.getenv('UPLOAD_INTERVAL_MS', '1000'))
 PDF_FETCH_TIMEOUT = int(os.getenv('PDF_FETCH_TIMEOUT', '5'))
 
-def log(message: str, level: str = "INFO"):
-    """Log message to console and file. Levels: ERROR, WARN, PERF."""
+def log(message: str, level: str = "INFO") -> None:
     if level not in ["ERROR", "WARN", "PERF"]:
         return
     
@@ -50,17 +48,15 @@ def log(message: str, level: str = "INFO"):
     try:
         with open("app_simple_log.txt", "a", encoding="utf-8") as f:
             f.write(f"{datetime.now().isoformat()} - [{level}] {message}\n")
-    except:
+    except Exception:
         pass
 
 def parse_csv_date(date_str: Optional[str]) -> Optional[str]:
-    """Return date string if valid, None otherwise."""
     if not date_str or not date_str.strip():
-            return None
+        return None
     return date_str.strip()
 
 class SimpleSurveyService:
-    
     def __init__(self, client_id: str, items_per_page: int = 20):
         self.client_id = client_id
         self.items_per_page = items_per_page
@@ -88,7 +84,6 @@ class SimpleSurveyService:
         return self._client
     
     def _parse_csv_surveys(self, csv_data: str) -> List[Dict]:
-        """Parse CSV data into list of survey dictionaries."""
         import csv
         from io import StringIO
         
@@ -133,7 +128,6 @@ class SimpleSurveyService:
         return surveys
     
     def load_surveys(self, force_refresh: bool = False) -> List[Dict]:
-        """Load surveys from CSV. Each Gunicorn worker loads independently."""
         with self._lock:
             if self._is_loaded and not force_refresh:
                 return self._all_surveys
@@ -163,7 +157,7 @@ class SimpleSurveyService:
             log(f"Failed to load surveys: {e}", "ERROR")
             with self._lock:
                 self._is_loading = False
-            raise  # Re-raise so caller knows it failed
+            raise
     
     def is_loaded(self) -> bool:
         return self._is_loaded
@@ -193,10 +187,17 @@ class SimpleSurveyService:
         
         return matches
     
-    def clear_cache(self):
+    def clear_cache(self) -> None:
         with self._lock:
             self._all_surveys = []
             self._is_loaded = False
+    
+    def is_loading(self) -> bool:
+        return self._is_loading
+    
+    def start_loading(self) -> None:
+        with self._lock:
+            self._is_loading = True
 
 class SimpleJazzHRService:
     def __init__(self, api_key: str, cache, max_workers: int = 6):
@@ -213,7 +214,8 @@ class SimpleJazzHRService:
             self._checker = JazzHRUploadChecker(api_key=self.api_key)
         return self._checker
     
-    def _wait_for_rate_limit(self):
+    def _wait_for_rate_limit(self) -> None:
+        wait_time = 0
         with self._lock:
             now = datetime.now()
             cutoff = now - timedelta(minutes=1)
@@ -222,9 +224,13 @@ class SimpleJazzHRService:
             if len(self._call_times) >= int(self._rate_limit * 0.9):
                 wait_time = 60 - (now - self._call_times[0]).total_seconds() + 0.5
                 if wait_time > 0:
-                    time.sleep(wait_time)
                     self._call_times = []
-            
+        
+        if wait_time > 0:
+            log(f"Rate limit hit, waiting {wait_time:.1f}s", "WARN")
+            time.sleep(wait_time)
+        
+        with self._lock:
             self._call_times.append(datetime.now())
     
     def check_one_survey(self, survey: Dict, pdf_url: str, pdf_size: Optional[int]) -> Dict:
@@ -350,7 +356,6 @@ class SimpleJazzHRService:
         return True
     
     def upload_pdf_to_jazzhr(self, survey: Dict, pdf_url: str, applicant_id: str) -> Dict:
-        """Upload PDF to JazzHR with exponential backoff retry. Does not retry permanent failures."""
         survey_id = str(survey.get('surveyId', ''))
         checker = self._get_checker()
         first_name = survey.get('firstName', '').strip()
@@ -462,7 +467,6 @@ def fetch_pdf_sizes(urls: Dict[str, str], pdf_cache, max_workers: int = 8) -> Di
     return results
 
 class BackgroundJazzHRChecker:
-    
     def __init__(self, survey_service, jazzhr_service, pdf_cache):
         self.survey_service = survey_service
         self.jazzhr_service = jazzhr_service
@@ -471,7 +475,7 @@ class BackgroundJazzHRChecker:
         self._stop_flag = False
         self._lock = RLock()
     
-    def start_checking(self):
+    def start_checking(self) -> None:
         with self._lock:
             if self._check_thread and self._check_thread.is_alive():
                 return
@@ -479,10 +483,10 @@ class BackgroundJazzHRChecker:
             self._check_thread = Thread(target=self._check_worker, daemon=True, name="JazzHRChecker")
             self._check_thread.start()
     
-    def stop_checking(self):
+    def stop_checking(self) -> None:
         self._stop_flag = True
     
-    def _check_worker(self):
+    def _check_worker(self) -> None:
         try:
             max_wait = 60
             waited = 0
@@ -561,7 +565,6 @@ app = Dash(__name__, suppress_callback_exceptions=True)
 app.title = "Culture Index - HR Tool"
 server = app.server
 
-# Initialize authentication
 auth_manager = AuthManager(server)
 
 if not os.path.exists("assets"):
@@ -569,7 +572,6 @@ if not os.path.exists("assets"):
 
 @server.route('/health')
 def health_check():
-    """Health check endpoint. Returns JSON with system status."""
     from flask import jsonify
     
     try:
@@ -618,7 +620,6 @@ def health_check():
 
 @server.route('/health/ready')
 def readiness_check():
-    """Readiness check. Returns 200 when app is ready to serve requests."""
     from flask import jsonify
     
     if not survey_service.is_loaded():
@@ -631,13 +632,11 @@ def readiness_check():
 
 @server.route('/health/live')
 def liveness_check():
-    """Liveness check. Returns 200 if app is running."""
     from flask import jsonify
     return jsonify({"alive": True, "timestamp": datetime.now().isoformat()})
 
 @server.route('/login', methods=['GET', 'POST'])
 def login():
-    """Login route - GET shows form, POST processes login"""
     if current_user.is_authenticated:
         return redirect('/')
     
@@ -653,38 +652,30 @@ def login():
                 return redirect(next_page)
             return redirect('/')
         else:
-            # Return login page with error
             return app.index(error_message=message)
     
-    # GET request - show login form
     return app.index()
 
 @server.route('/logout')
 def logout():
-    """Logout route"""
     auth_manager.logout()
     return redirect('/login')
 
 @server.before_request
 def require_login():
-    """Require authentication for all routes except login, logout, and health checks"""
     allowed_routes = ['/login', '/logout', '/health', '/health/ready', '/health/live', '/_dash-layout', '/_dash-dependencies', '/_dash-update-component', '/_reload-hash']
     
-    # Allow access to static assets
     if request.path.startswith('/assets/') or request.path.startswith('/_dash-component-suites/'):
         return None
     
-    # Check if route is allowed
     for route in allowed_routes:
         if request.path.startswith(route):
             return None
     
-    # Require authentication for all other routes
     if not current_user.is_authenticated:
         return redirect('/login?next=' + request.path)
 
 def serve_layout():
-    """Serve layout based on authentication status"""
     if not current_user.is_authenticated:
         return create_login_layout()
     
@@ -694,13 +685,7 @@ def serve_layout():
                 html.Div([
                     html.Img(src="/assets/SENERGY-Logo_Icon-Yellow.png", className="header-logo"),
                 ], className="header-left"),
-                
                 html.Div([
-                    html.Div("HR INTERNAL TOOL [v4.0]", className="header-title"),
-                ], className="header-center"),
-                
-                html.Div([
-                    html.Div(id="upload-status", className="upload-status"),
                     html.Button("Upload Selected", id="upload-btn", className="upload-btn", n_clicks=0, disabled=True),
                     html.Button("Refresh JazzHR", id="refresh-jazzhr-btn", className="refresh-btn", n_clicks=0),
                     html.Button("Refresh CI", id="refresh-btn", className="refresh-btn", n_clicks=0),
@@ -727,6 +712,7 @@ def serve_layout():
                         ], className="search-container"),
                         
                         html.Div([
+                            html.Div(id="upload-status", className="upload-status"),
                             dcc.Checklist(
                                 id="select-all-checkbox",
                                 options=[{"label": " Select All Uploadable", "value": "all"}],
@@ -769,7 +755,6 @@ def serve_layout():
 app.layout = serve_layout
 
 def build_survey_display(surveys: List[Dict], jazzhr_results: Dict, pdf_sizes: Dict) -> Tuple[List, List, List]:
-    """Build survey display elements. Returns (survey_items, uploadable_ids, surveys_data)."""
     survey_items = []
     uploadable_ids = []
     surveys_data = []
@@ -863,6 +848,9 @@ def build_survey_display(surveys: List[Dict], jazzhr_results: Dict, pdf_sizes: D
 
 _callback_lock = Lock()
 _last_render_result = None
+_active_uploads = set()
+_active_uploads_lock = Lock()
+_completed_uploads = {}
 
 @callback(
     [Output("surveys-container", "children"),
@@ -880,7 +868,6 @@ _last_render_result = None
     prevent_initial_call=False
 )
 def display_surveys(page, search_query, refresh_trigger, n_intervals):
-    """Main callback that renders the survey list."""
     global _last_render_result
     
     acquired = _callback_lock.acquire(blocking=False)
@@ -904,6 +891,15 @@ def display_surveys(page, search_query, refresh_trigger, n_intervals):
             page = 1
         
         if not survey_service.is_loaded():
+            if survey_service.is_loading():
+                result = (
+                    [html.Div("Refreshing surveys from Culture Index...", className="empty-message")],
+                    "Refreshing...", True, True, "Refreshing data...",
+                    [], [], {"display": "block"}
+                )
+                _last_render_result = result
+                return result
+            
             log(f"First request - loading surveys (trigger={triggered_id})", "WARN")
             try:
                 survey_service.load_surveys(force_refresh=False)
@@ -924,6 +920,15 @@ def display_surveys(page, search_query, refresh_trigger, n_intervals):
                 return result
         
         if not survey_service.is_loaded():
+            if survey_service.is_loading():
+                result = (
+                    [html.Div("Refreshing surveys from Culture Index...", className="empty-message")],
+                    "Refreshing...", True, True, "Refreshing data...",
+                    [], [], {"display": "block"}
+                )
+                _last_render_result = result
+                return result
+            
             result = (
                 [html.Div("Failed to load survey data", className="empty-message")],
                 "Error", True, True, "Load failed",
@@ -963,12 +968,28 @@ def display_surveys(page, search_query, refresh_trigger, n_intervals):
             survey_ids = [str(s['surveyId']) for s in surveys]
             cached_batch = jazzhr_cache.get_batch(survey_ids)
             jazzhr_results = {}
-            for survey_id in survey_ids:
+            uncached_surveys = []
+            
+            for survey in surveys:
+                survey_id = str(survey['surveyId'])
                 cached = cached_batch.get(survey_id)
                 if cached:
                     jazzhr_results[survey_id] = cached
                 else:
                     jazzhr_results[survey_id] = {"status": None, "isUploaded": False}
+                    uncached_surveys.append(survey)
+            
+            if uncached_surveys:
+                def check_uncached():
+                    try:
+                        urls_uncached = {str(s['surveyId']): s.get('surveyReportUrl') for s in uncached_surveys}
+                        urls_to_check = {sid: url for sid, url in urls_uncached.items() if url}
+                        pdf_sizes_uncached = fetch_pdf_sizes(urls_to_check, pdf_size_cache)
+                        jazzhr_service.check_surveys_batch(uncached_surveys, urls_uncached, pdf_sizes_uncached)
+                    except Exception as e:
+                        log(f"Error checking uncached surveys: {e}", "ERROR")
+                
+                Thread(target=check_uncached, daemon=True).start()
         
         try:
             survey_items, uploadable_ids, surveys_data = build_survey_display(surveys, jazzhr_results, pdf_sizes)
@@ -1035,7 +1056,6 @@ def display_surveys(page, search_query, refresh_trigger, n_intervals):
     prevent_initial_call=True
 )
 def handle_login_callback(n_clicks, username_submit, password_submit, username, password):
-    """Handle login form submission via Dash callback"""
     if not current_user.is_authenticated:
         if username and password:
             success, message = auth_manager.attempt_login(username, password)
@@ -1095,6 +1115,7 @@ def handle_refresh_ci(n_clicks, current_trigger):
     if not n_clicks:
         return dash.no_update, dash.no_update, dash.no_update, dash.no_update
     
+    survey_service.start_loading()
     survey_service.clear_cache()
     background_checker.stop_checking()
     
@@ -1123,7 +1144,6 @@ def handle_refresh_ci(n_clicks, current_trigger):
 def handle_refresh_jazzhr(n_clicks, surveys_data, current_trigger):
     if not n_clicks:
         return dash.no_update
-    
     
     cleared = 0
     for s in surveys_data:
@@ -1182,6 +1202,8 @@ def update_selection_count(checkbox_values):
     prevent_initial_call=True
 )
 def handle_upload_selected(n_clicks, checkbox_values, surveys_data, existing_queue):
+    global _active_uploads, _completed_uploads
+    
     if not n_clicks or existing_queue:
         return dash.no_update, dash.no_update, dash.no_update, dash.no_update
     
@@ -1192,6 +1214,11 @@ def handle_upload_selected(n_clicks, checkbox_values, surveys_data, existing_que
     
     if len(selected_ids) > MAX_BATCH_UPLOAD:
         return [], {}, True, f"Max {MAX_BATCH_UPLOAD} at a time"
+    
+    with _active_uploads_lock:
+        conflicting = [sid for sid in selected_ids if str(sid) in _active_uploads or str(sid) in _completed_uploads]
+        if conflicting:
+            return dash.no_update, dash.no_update, dash.no_update, "Some surveys already uploading"
     
     queue = []
     for survey_id in selected_ids:
@@ -1221,6 +1248,8 @@ def handle_upload_selected(n_clicks, checkbox_values, surveys_data, existing_que
     prevent_initial_call=True
 )
 def handle_single_upload(n_clicks_list, surveys_data, existing_queue):
+    global _active_uploads, _completed_uploads
+    
     triggered = ctx.triggered
     if not triggered or not triggered[0]:
         return dash.no_update, dash.no_update, dash.no_update, dash.no_update
@@ -1245,6 +1274,13 @@ def handle_single_upload(n_clicks_list, surveys_data, existing_queue):
     has_click = any(c and c > 0 for c in (n_clicks_list or []))
     if not has_click:
         return dash.no_update, dash.no_update, dash.no_update, dash.no_update
+    
+    with _active_uploads_lock:
+        if survey_id in _active_uploads or survey_id in _completed_uploads:
+            log(f"Blocked duplicate upload for {survey_id}", "WARN")
+            return dash.no_update, dash.no_update, dash.no_update, "Upload already in progress"
+    
+    log(f"Queueing upload for {survey_id}", "WARN")
     
     survey_data = next((s for s in surveys_data if str(s.get("surveyId")) == survey_id), None)
     if not survey_data or not survey_data.get("applicant_id") or not survey_data.get("pdf_url"):
@@ -1274,23 +1310,53 @@ def handle_single_upload(n_clicks_list, surveys_data, existing_queue):
     prevent_initial_call=True
 )
 def process_upload_queue(n_intervals, queue, results, refresh_trigger):
-    """Process upload queue one item at a time."""
+    global _active_uploads, _completed_uploads
+    
     if n_intervals is None or n_intervals <= 1:
         return dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update
     
     if not queue:
         if results:
+            with _active_uploads_lock:
+                _active_uploads.clear()
+                _completed_uploads.clear()
+            
             success_count = sum(1 for r in results.values() if r.get("success"))
             fail_count = len(results) - success_count
             msg = f"Done: {success_count} uploaded"
             if fail_count > 0:
                 msg += f", {fail_count} failed"
             return [], results, True, msg, refresh_trigger + 1
-            return [], results, True, "", dash.no_update
+        return [], results, True, "", dash.no_update
     
     current = queue[0]
     remaining = queue[1:]
     survey_id = str(current["survey_id"])
+    
+    with _active_uploads_lock:
+        if survey_id in _completed_uploads:
+            log(f"Skipping {survey_id} - already completed globally", "WARN")
+            result = _completed_uploads[survey_id]
+            if survey_id not in results:
+                results[survey_id] = result
+            
+            if len(remaining) == 0:
+                success_count = sum(1 for r in results.values() if r.get("success"))
+                fail_count = len(results) - success_count
+                msg = f"Done: {success_count} uploaded"
+                if fail_count > 0:
+                    msg += f", {fail_count} failed"
+                _active_uploads.clear()
+                _completed_uploads.clear()
+                return remaining, results, True, msg, refresh_trigger + 1
+            
+            return remaining, results, False, f"Processing {len(results)}/{len(results)+len(remaining)}...", dash.no_update
+        
+        if survey_id in _active_uploads:
+            log(f"Skipping {survey_id} - actively processing", "WARN")
+            return dash.no_update, dash.no_update, dash.no_update, "Processing...", dash.no_update
+        
+        _active_uploads.add(survey_id)
     
     survey_data = {
         "surveyId": survey_id,
@@ -1298,21 +1364,35 @@ def process_upload_queue(n_intervals, queue, results, refresh_trigger):
         "lastName": current["lastName"]
     }
     
+    log(f"Starting upload process for {survey_id}", "WARN")
     try:
-        
         result = jazzhr_service.upload_pdf_to_jazzhr(
             survey=survey_data,
             pdf_url=current["pdf_url"],
             applicant_id=current["applicant_id"]
         )
         
+        log(f"Upload completed for {survey_id}: success={result.get('success')}", "WARN")
+        
         if not result.get("success"):
             log(f"Upload failed: {survey_id} - {result.get('error')}", "ERROR")
+        
+        with _active_uploads_lock:
+            _completed_uploads[survey_id] = result
+            _active_uploads.discard(survey_id)
         
         results[survey_id] = result
     except Exception as e:
         log(f"Upload exception: {survey_id} - {e}", "ERROR")
-        results[survey_id] = {"success": False, "error": str(e)}
+        import traceback
+        traceback.print_exc()
+        result = {"success": False, "error": str(e)}
+        
+        with _active_uploads_lock:
+            _completed_uploads[survey_id] = result
+            _active_uploads.discard(survey_id)
+        
+        results[survey_id] = result
     
     completed = len(results)
     total = completed + len(remaining)
