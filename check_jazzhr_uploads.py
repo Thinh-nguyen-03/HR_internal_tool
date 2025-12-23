@@ -18,7 +18,6 @@ class JazzHRUploadChecker:
         self.surveys_file = surveys_file
         self.base_url = "https://api.resumatorapi.com/v1"
         
-        # Configure session with connection pooling and keep-alive
         self.session = requests.Session()
         adapter = requests.adapters.HTTPAdapter(
             pool_connections=10,
@@ -28,7 +27,6 @@ class JazzHRUploadChecker:
         )
         self.session.mount('https://', adapter)
         self.session.mount('http://', adapter)
-        # Set keep-alive headers
         self.session.headers.update({'Connection': 'keep-alive'})
         
         self.api_call_count = 0
@@ -43,7 +41,6 @@ class JazzHRUploadChecker:
             params = {}
         params['apikey'] = self.api_key
         
-        # Build the full URL with params for logging
         from urllib.parse import urlencode
         clean_params = {k: v for k, v in params.items() if k != 'apikey'}
         full_url = f"{url}?{urlencode(params)}"
@@ -59,8 +56,6 @@ class JazzHRUploadChecker:
             if verbose:
                 print(f"    [API] Sending GET request at {time.strftime('%H:%M:%S')}...")
             
-            # Add more granular timing
-            # DNS lookup happens automatically in requests.get
             connect_start = time.time()
             response = self.session.get(url, params=params, timeout=30)
             connect_time = time.time() - connect_start
@@ -72,7 +67,6 @@ class JazzHRUploadChecker:
                 print(f"    [API] Status code: {response.status_code}")
                 content_length = response.headers.get('Content-Length', 'chunked')
                 print(f"    [API] Response headers: Content-Type={response.headers.get('Content-Type', 'unknown')}, Content-Length={content_length}")
-                # Check if response was chunked (streaming)
                 if content_length == 'chunked':
                     print(f"    [API] Response is chunked (streaming)")
             
@@ -93,7 +87,6 @@ class JazzHRUploadChecker:
                     print(f"    [API] Response is a list with {len(result)} items")
                     if len(result) > 0:
                         print(f"    [API] First item keys: {list(result[0].keys()) if isinstance(result[0], dict) else 'N/A'}")
-                        # Show first item (truncated)
                         if isinstance(result[0], dict):
                             first_item_sample = {k: str(v)[:50] for k, v in list(result[0].items())[:5]}
                             print(f"    [API] First item sample: {first_item_sample}")
@@ -103,13 +96,11 @@ class JazzHRUploadChecker:
                         first_key = list(result.keys())[0]
                         print(f"    [API] First key '{first_key}': {str(result[first_key])[:100]}")
                 print(f"    [API] Total time: {elapsed:.2f}s")
-            # Slow API warnings suppressed unless verbose=True
             
             return result
         except requests.RequestException as e:
             elapsed = time.time() - start_time
             self.api_call_count += 1
-            # Only log errors if verbose, otherwise silently fail
             if verbose:
                 print(f"\n    [ERROR] API request failed after {elapsed:.2f}s")
                 print(f"    [ERROR] URL: {full_url[:200]}")
@@ -131,14 +122,11 @@ class JazzHRUploadChecker:
         if verbose:
             print(f"    [SEARCH] Searching for applicant: {full_name}")
         
-        # Use the correct API endpoint format: /applicants/name/{name} (path parameter, not query parameter)
-        # URL encode the name for the path
         from urllib.parse import quote
         encoded_name = quote(full_name)
         endpoint = f"/applicants/name/{encoded_name}"
         
         search_start = time.time()
-        # Make request with no params (name is in the path, apikey will be added by _make_request)
         response = self._make_request(endpoint, params=None, verbose=verbose)
         search_time = time.time() - search_start
         
@@ -153,8 +141,6 @@ class JazzHRUploadChecker:
             return None
         
         parse_start = time.time()
-        # With the correct endpoint format, the API should return a single applicant or a list
-        # Convert to list for consistent handling
         applicants = response if isinstance(response, list) else [response] if response else []
         
         if verbose:
@@ -167,7 +153,6 @@ class JazzHRUploadChecker:
                 app_last = applicant.get('last_name', '')
                 applicant_id = applicant.get('id', 'unknown')
                 print(f"    [SEARCH] Found applicant: '{app_first} {app_last}' (ID: {applicant_id})")
-                # Verify it's an exact match
                 if app_first.lower().strip() == first_name.lower().strip() and app_last.lower().strip() == last_name.lower().strip():
                     print(f"    [SEARCH] Exact name match confirmed")
                 else:
@@ -183,7 +168,6 @@ class JazzHRUploadChecker:
         elapsed = time.time() - start_time
         self.search_times.append(elapsed)
         
-        # Return the first (and should be only) applicant if found
         if len(applicants) > 0:
             matched_applicant = applicants[0]
             if verbose:
@@ -200,11 +184,9 @@ class JazzHRUploadChecker:
             if expected_name:
                 print(f"    [FILES] Expected applicant name: {expected_name}")
         
-        # Use the correct API endpoint format: /files/applicant_id/{applicant_id} (path parameter, not query parameter)
         endpoint = f"/files/applicant_id/{applicant_id}"
         
         files_start = time.time()
-        # Make request with no params (applicant_id is in the path, apikey will be added by _make_request)
         response = self._make_request(endpoint, params=None, verbose=verbose)
         files_time = time.time() - files_start
         
@@ -224,7 +206,6 @@ class JazzHRUploadChecker:
             if len(files) > 0:
                 print(f"    [FILES] Sample file structure (first file keys): {list(files[0].keys()) if isinstance(files[0], dict) else 'N/A'}")
         
-        # Filter files to ensure they belong to the correct applicant
         filtered_files = []
         mismatched_files = []
         for idx, file_data in enumerate(files):
@@ -262,18 +243,15 @@ class JazzHRUploadChecker:
         
         return filtered_files
     
-    def check_pdf_match(self, survey_pdf_url: str, survey_pdf_size: Optional[int], 
-                       jazzhr_files: List[Dict], first_name: str = "", last_name: str = "", 
-                       verbose: bool = False) -> Optional[Dict]:
-        """
-        Match CI PDF with JazzHR files using improved prioritized matching:
-        1. Exact size match (most reliable - exact byte comparison)
-        2. Exact filename match
-        3. Person name (full or initials) + CI keyword match
-        
-        Removed: Broad keyword-only matching (too many false positives)
-        Added: Support for initials (e.g., "TN_CI.pdf" for "Thinh Nguyen")
-        """
+    def check_pdf_match(
+        self, 
+        survey_pdf_url: str, 
+        survey_pdf_size: Optional[int], 
+        jazzhr_files: List[Dict], 
+        first_name: str = "", 
+        last_name: str = "", 
+        verbose: bool = False
+    ) -> Optional[Dict]:
         start_time = time.time()
         
         if not survey_pdf_url:
@@ -289,7 +267,6 @@ class JazzHRUploadChecker:
             print(f"    [MATCH] Person: {first_name} {last_name}")
             print(f"    [MATCH] Checking {len(jazzhr_files)} JazzHR files...")
         
-        # Extract person identifiers for matching
         ci_basename = None
         if ci_filename:
             ci_basename = ci_filename.replace('.pdf', '').split('_(')[0]
@@ -316,43 +293,33 @@ class JazzHRUploadChecker:
             name_match = False
             match_type = None
             
-            # Priority 1: Exact filename match (very reliable)
             if ci_filename:
                 ci_filename_lower = ci_filename.lower()
                 if ci_filename_lower == jazz_lower or ci_filename_lower.replace('.pdf', '') == jazz_lower.replace('.pdf', ''):
                     name_match = True
                     match_type = 'exact_filename'
             
-            # Priority 1b: Match our uploaded filename pattern: FirstName_LastName_(SurveyID).pdf
             survey_id = survey_pdf_url.split('/')[-1].split('_')[-1].replace('(', '').replace(')', '').replace('.pdf', '') if '(' in survey_pdf_url else None
             if not name_match and survey_id and first_name and last_name:
-                # Check if JazzHR filename matches: FirstName_LastName_(SurveyID).pdf
                 expected_pattern = f"{first_name}_{last_name}_({survey_id})".lower().replace(' ', '_')
                 if expected_pattern in jazz_lower.replace(' ', '_'):
                     name_match = True
                     match_type = 'uploaded_filename_pattern'
             
-            # Priority 2: Person name + CI keyword match (more specific than keyword alone)
             if not name_match and first_name and last_name:
-                # Check for name indicators (full name, initials, or basename)
                 has_name_indicator = False
                 
-                # Full name check
                 if full_name_clean in jazz_lower:
                     has_name_indicator = True
-                # Initials check (handles TN, T_N, T N, etc.)
                 elif first_initial and last_initial:
-                    # Remove separators to check initials
                     jazz_normalized = jazz_lower.replace('_', '').replace(' ', '').replace('-', '')
                     if f"{first_initial}{last_initial}" in jazz_normalized:
                         has_name_indicator = True
-                # Basename from CI filename
                 elif ci_basename:
                     ci_clean = ci_basename.replace('_', ' ').lower()
                     if ci_clean in jazz_lower:
                         has_name_indicator = True
                 
-                # Check for CI indicators
                 has_ci_indicator = (
                     ('culture' in jazz_lower and 'index' in jazz_lower) or
                     'cultureindex' in jazz_lower or
@@ -362,24 +329,17 @@ class JazzHRUploadChecker:
                     ' ci ' in jazz_lower
                 )
                 
-                # Both name and CI indicator required (no broad keyword matching)
                 if has_name_indicator and has_ci_indicator:
                     name_match = True
                     match_type = 'name_and_ci_keyword'
             
-            # Size match (most reliable - exact byte comparison)
-            # Also allow fuzzy match within 2% or 2KB (whichever is larger) for PDF processing differences
             size_match = False
             if survey_pdf_size and jazz_size:
                 size_diff = abs(jazz_size - survey_pdf_size)
-                size_tolerance = max(2048, int(survey_pdf_size * 0.02))  # 2% or 2KB
+                size_tolerance = max(2048, int(survey_pdf_size * 0.02))
                 if jazz_size == survey_pdf_size or size_diff <= size_tolerance:
                     size_match = True
             
-            # Accept match if:
-            # 1. Both name and size match (highest confidence)
-            # 2. Size matches alone (very reliable - exact byte match)
-            # 3. Name matches with strong pattern AND no size available to check
             if (name_match and size_match) or (size_match and survey_pdf_size) or (name_match and not survey_pdf_size):
                 elapsed = time.time() - start_time
                 self.file_check_times.append(elapsed)
@@ -418,15 +378,8 @@ class JazzHRUploadChecker:
         last_name: str,
         verbose: bool = False
     ) -> Dict:
-        """
-        Download PDF from Culture Index and upload to JazzHR.
-        
-        Returns:
-            Dict with keys: success, message, file_id (if successful), error (if failed)
-        """
         import base64
         
-        # Step 1: Download the PDF into memory
         try:
             if verbose:
                 print(f"    [UPLOAD] Downloading PDF from {pdf_url[:60]}...")
@@ -440,17 +393,13 @@ class JazzHRUploadChecker:
         except Exception as e:
             return {"success": False, "error": f"Failed to download PDF: {e}"}
         
-        # Step 2: Base64 encode (in memory, no disk)
         file_data = base64.b64encode(pdf_content).decode('utf-8')
         
-        # Step 3: Generate filename
         safe_first = ''.join(c for c in first_name if c.isalnum() or c in ' -_').strip().replace(' ', '_')
         safe_last = ''.join(c for c in last_name if c.isalnum() or c in ' -_').strip().replace(' ', '_')
         filename = f"{safe_first}_{safe_last}_CultureIndex.pdf"
         
-        # Step 4: Upload to JazzHR
         try:
-            # Debug: Log API key status
             if not self.api_key:
                 return {"success": False, "error": "API key is None or empty in JazzHRUploadChecker"}
             
@@ -461,7 +410,7 @@ class JazzHRUploadChecker:
                 "applicant_id": applicant_id,
                 "filename": filename,
                 "file_data": file_data,
-                "file_privacy": "0"  # Everyone can see
+                "file_privacy": "0"
             }
             
             if verbose:
@@ -521,7 +470,7 @@ class JazzHRUploadChecker:
             try:
                 with open(self.surveys_file, 'r', encoding='utf-8') as f:
                     lines = f.readlines()
-                    error_line = e.lineno - 1  # Convert to 0-based index
+                    error_line = e.lineno - 1
                     start_line = max(0, error_line - 3)
                     end_line = min(len(lines), error_line + 4)
                     print(f"\nContext around error (lines {start_line+1}-{end_line}):")
