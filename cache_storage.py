@@ -5,60 +5,40 @@ from datetime import datetime, timedelta
 from threading import RLock
 from typing import Dict, List, Optional, Any
 
-# =============================================================================
-# ABSTRACT CACHE INTERFACE
-# =============================================================================
-
 class CacheBackend(ABC):
-    """Abstract cache interface - all backends must implement these methods."""
-    
     @abstractmethod
     def get(self, key: str) -> Optional[Dict]:
-        """Get item from cache. Returns None if not found or expired."""
         pass
     
     @abstractmethod
     def get_permanent(self, key: str) -> Optional[Dict]:
-        """Get item ignoring TTL (for old surveys with permanent cache)."""
         pass
     
     @abstractmethod
     def set(self, key: str, value: Dict, permanent: bool = False):
-        """Set item in cache. If permanent=True, never expires."""
         pass
     
     @abstractmethod
     def delete(self, key: str):
-        """Delete item from cache."""
         pass
     
     @abstractmethod
     def save(self):
-        """Persist changes (for file backend). No-op for Redis."""
         pass
     
     @abstractmethod
     def get_count(self) -> int:
-        """Get total number of items in cache."""
         pass
     
     @abstractmethod
     def get_version(self) -> int:
-        """Get cache version (increments on changes)."""
         pass
     
     @abstractmethod
     def get_all_keys(self) -> List[str]:
-        """Get all keys in the cache."""
         pass
 
-# =============================================================================
-# FILE-BASED CACHE (Development)
-# =============================================================================
-
 class FileCache(CacheBackend):
-    """JSON file-based cache for local development."""
-    
     def __init__(self, cache_file: str, ttl_hours: int = 24):
         self.cache_file = cache_file
         self.ttl_hours = ttl_hours
@@ -94,7 +74,6 @@ class FileCache(CacheBackend):
             print(f"[CACHE] File save error: {e}")
     
     def get(self, key: str) -> Optional[Dict]:
-        """Get item if not expired (respects TTL)."""
         with self._lock:
             item = self._cache.get(key)
             if item:
@@ -108,7 +87,6 @@ class FileCache(CacheBackend):
             return None
     
     def get_batch(self, keys: List[str]) -> Dict[str, Optional[Dict]]:
-        """Get multiple items at once (for API consistency with Redis)."""
         result = {}
         with self._lock:
             for key in keys:
@@ -116,7 +94,6 @@ class FileCache(CacheBackend):
         return result
     
     def get_permanent(self, key: str) -> Optional[Dict]:
-        """Get item ignoring TTL."""
         with self._lock:
             return self._cache.get(key)
     
@@ -147,21 +124,15 @@ class FileCache(CacheBackend):
             return list(self._cache.keys())
     
     def ping(self) -> bool:
-        """Health check - FileCache is always healthy if it exists."""
         return True
     
     def is_healthy(self) -> Dict:
-        """Return health status."""
         return {
             "connected": True,
             "type": "file",
             "cache_file": self.cache_file,
             "item_count": len(self._cache)
         }
-
-# =============================================================================
-# REDIS CACHE (Production/Cloud) - with robust error handling
-# =============================================================================
 
 class RedisCache(CacheBackend):
     """
@@ -246,7 +217,6 @@ class RedisCache(CacheBackend):
             return False
     
     def _ensure_connected(self) -> bool:
-        """Check connection and attempt reconnect if needed. Returns connection status."""
         if self._is_connected and self._redis:
             return True
         
@@ -277,17 +247,14 @@ class RedisCache(CacheBackend):
             return default
     
     def _key(self, key: str) -> str:
-        """Add prefix to key."""
         return f"{self.prefix}:{key}"
     
     def ping(self) -> bool:
-        """Health check - returns True if Redis is responsive."""
         def do_ping():
             return self._redis.ping()
         return self._safe_operation("ping", do_ping, default=False) or False
     
     def get(self, key: str) -> Optional[Dict]:
-        """Get item from cache. Returns None if not found, expired, or on error."""
         def do_get():
             data = self._redis.get(self._key(key))
             if data:
@@ -296,7 +263,6 @@ class RedisCache(CacheBackend):
         return self._safe_operation("get", do_get, default=None)
     
     def get_batch(self, keys: List[str]) -> Dict[str, Optional[Dict]]:
-        """Get multiple items in a single Redis call. Much faster than individual gets."""
         if not keys:
             return {}
         
@@ -317,11 +283,9 @@ class RedisCache(CacheBackend):
         return self._safe_operation("mget", do_mget, default={})
     
     def get_permanent(self, key: str) -> Optional[Dict]:
-        """Same as get() for Redis - TTL is handled at set time."""
         return self.get(key)
     
     def set(self, key: str, value: Dict, permanent: bool = False):
-        """Set item in cache. Returns True on success, False on error."""
         def do_set():
             value_copy = value.copy()
             value_copy['timestamp'] = datetime.now().isoformat()
@@ -342,7 +306,6 @@ class RedisCache(CacheBackend):
         return success or False
     
     def delete(self, key: str):
-        """Delete item from cache. Silently fails on error."""
         def do_delete():
             self._redis.delete(self._key(key))
             with self._lock:
@@ -352,7 +315,6 @@ class RedisCache(CacheBackend):
         self._safe_operation("delete", do_delete, default=False)
     
     def save(self):
-        """No-op for Redis - data is persisted immediately."""
         pass
     
     def get_count(self) -> int:
@@ -377,7 +339,6 @@ class RedisCache(CacheBackend):
         return self._safe_operation("get_count", do_count, default=0) or 0
     
     def get_version(self) -> int:
-        """Get cache version (local counter, always works)."""
         return self._version
     
     def get_all_keys(self) -> List[str]:
@@ -403,17 +364,12 @@ class RedisCache(CacheBackend):
         return self._safe_operation("get_all_keys", do_keys, default=[]) or []
     
     def is_healthy(self) -> Dict:
-        """Return health status for monitoring."""
         return {
             "connected": self._is_connected,
             "last_error": self._last_error,
             "prefix": self.prefix,
             "ttl_hours": self.ttl_hours
         }
-
-# =============================================================================
-# CACHE FACTORY
-# =============================================================================
 
 def create_cache(name: str, ttl_hours: int = 24, cache_file: str = None) -> CacheBackend:
     """
@@ -435,32 +391,19 @@ def create_cache(name: str, ttl_hours: int = 24, cache_file: str = None) -> Cach
         file_path = cache_file or f"{name}_cache.json"
         return FileCache(cache_file=file_path, ttl_hours=ttl_hours)
 
-# =============================================================================
-# SMART JAZZHR CACHE (with recent/old survey logic)
-# =============================================================================
-
 class SmartJazzHRCache:
-    """
-    JazzHR cache with intelligent TTL handling:
-    - Recent surveys (latest N): Normal TTL, refreshes periodically
-    - Old surveys: Permanent cache, never expires
-    """
-    
     def __init__(self, cache: CacheBackend, recent_threshold: int = 2000):
         self.cache = cache
         self.recent_threshold = recent_threshold
         self._recent_survey_ids = set()  # Track which surveys are "recent"
     
     def set_recent_surveys(self, survey_ids: List[str]):
-        """Update the set of recent survey IDs."""
         self._recent_survey_ids = set(str(sid) for sid in survey_ids[:self.recent_threshold])
     
     def is_recent(self, survey_id: str) -> bool:
-        """Check if survey is in the recent set."""
         return str(survey_id) in self._recent_survey_ids
     
     def get(self, survey_id: str) -> Optional[Dict]:
-        """Get cached status - uses permanent cache for old surveys."""
         survey_id = str(survey_id)
         if self.is_recent(survey_id):
             # Recent survey - respect TTL
@@ -470,7 +413,6 @@ class SmartJazzHRCache:
             return self.cache.get_permanent(survey_id)
     
     def get_batch(self, survey_ids: List[str]) -> Dict[str, Optional[Dict]]:
-        """Get multiple cached statuses in a single operation (much faster)."""
         if not survey_ids:
             return {}
         
@@ -479,7 +421,6 @@ class SmartJazzHRCache:
         return self.cache.get_batch(str_ids)
     
     def set(self, survey_id: str, value: Dict):
-        """Set cached status - permanent for old surveys."""
         survey_id = str(survey_id)
         is_permanent = not self.is_recent(survey_id)
         success = self.cache.set(survey_id, value, permanent=is_permanent)
@@ -489,11 +430,9 @@ class SmartJazzHRCache:
         return success
     
     def delete(self, survey_id: str):
-        """Delete cached status."""
         self.cache.delete(str(survey_id))
     
     def save(self):
-        """Persist changes."""
         self.cache.save()
     
     def get_count(self) -> int:
@@ -503,14 +442,11 @@ class SmartJazzHRCache:
         return self.cache.get_version()
     
     def ping(self) -> bool:
-        """Health check - delegates to underlying cache."""
         if hasattr(self.cache, 'ping'):
             return self.cache.ping()
         return True  # FileCache is always "healthy"
     
     def is_healthy(self) -> Dict:
-        """Return health status for monitoring."""
         if hasattr(self.cache, 'is_healthy'):
             return self.cache.is_healthy()
         return {"connected": True, "type": "file"}
-
