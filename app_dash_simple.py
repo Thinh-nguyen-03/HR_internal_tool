@@ -68,6 +68,7 @@ class SimpleSurveyService:
     
     def _get_client(self) -> CultureIndexClient:
         if self._client and self._client.is_authenticated():
+            log("Using existing authenticated client", "WARN")
             return self._client
         
         email = os.getenv("CULTUREINDEX_EMAIL")
@@ -79,8 +80,10 @@ class SimpleSurveyService:
         email = email.strip()
         password = password.strip()
         
+        log(f"Authenticating with Culture Index for {email[:3]}***", "WARN")
         self._client = CultureIndexClient()
         self._client.login(email=email, password=password)
+        log("Authentication successful", "WARN")
         return self._client
     
     def _parse_csv_surveys(self, csv_data: str) -> List[Dict]:
@@ -139,18 +142,28 @@ class SimpleSurveyService:
             self._is_loading = True
         
         try:
-            log("Downloading CSV data...", "WARN")
+            log(f"Starting survey load (force_refresh={force_refresh})", "WARN")
             start = time.time()
+            
+            log("Getting authenticated client...", "WARN")
             client = self._get_client()
+            
+            log(f"Downloading CSV data for client {self.client_id}...", "WARN")
+            csv_start = time.time()
             csv_data = client.export_surveys_csv(client_id=self.client_id)
+            log(f"CSV download completed in {time.time()-csv_start:.1f}s, size: {len(csv_data)} bytes", "WARN")
+            
+            log("Parsing CSV data...", "WARN")
+            parse_start = time.time()
             surveys = self._parse_csv_surveys(csv_data)
+            log(f"CSV parsing completed in {time.time()-parse_start:.1f}s, found {len(surveys)} surveys", "WARN")
             
             with self._lock:
                 self._all_surveys = surveys
                 self._is_loaded = True
                 self._is_loading = False
             
-            log(f"Loaded {len(surveys)} surveys in {time.time()-start:.1f}s", "WARN")
+            log(f"Survey load complete: {len(surveys)} surveys in {time.time()-start:.1f}s", "WARN")
             return surveys
             
         except Exception as e:
@@ -705,7 +718,7 @@ def serve_layout():
                                 id="search-input",
                                 type="text",
                                 placeholder="Search by name...",
-                                debounce=True,
+                                debounce=False,
                                 className="search-input"
                             ),
                             html.Button("Clear", id="clear-search-btn", className="clear-search-btn", n_clicks=0),
@@ -848,6 +861,8 @@ def build_survey_display(surveys: List[Dict], jazzhr_results: Dict, pdf_sizes: D
 
 _callback_lock = Lock()
 _last_render_result = None
+_last_search_query = ""
+_last_search_page = 1
 _active_uploads = set()
 _active_uploads_lock = Lock()
 _completed_uploads = {}
@@ -868,7 +883,23 @@ _completed_uploads = {}
     prevent_initial_call=False
 )
 def display_surveys(page, search_query, refresh_trigger, n_intervals):
-    global _last_render_result
+    global _last_render_result, _last_search_query, _last_search_page
+    
+    # Quick check if this is same query/page as last time
+    if page is None:
+        page = 1
+    
+    try:
+        triggered_id = ctx.triggered_id
+    except (AttributeError, RuntimeError):
+        triggered_id = None
+    
+    # If same search and page, and not a refresh, return cached result immediately
+    if (triggered_id != "refresh-trigger" and 
+        _last_render_result and 
+        _last_search_query == (search_query or "") and 
+        _last_search_page == page):
+        return _last_render_result
     
     acquired = _callback_lock.acquire(blocking=False)
     if not acquired:
@@ -882,12 +913,8 @@ def display_surveys(page, search_query, refresh_trigger, n_intervals):
     
     try:
         start_time = time.time()
-        try:
-            triggered_id = ctx.triggered_id
-        except (AttributeError, RuntimeError):
-            triggered_id = None
         
-        if page is None or page < 1:
+        if page < 1:
             page = 1
         
         if not survey_service.is_loaded():
@@ -945,8 +972,6 @@ def display_surveys(page, search_query, refresh_trigger, n_intervals):
         else:
             surveys, total_count = survey_service.get_page(page)
         
-        log(f"Got {len(surveys) if surveys else 0} surveys, total={total_count}", "WARN")
-        
         if not surveys:
             msg = f"No results for '{search_query}'" if search_query else "No surveys found."
             result = (
@@ -967,6 +992,7 @@ def display_surveys(page, search_query, refresh_trigger, n_intervals):
             pdf_sizes = {}
             survey_ids = [str(s['surveyId']) for s in surveys]
             cached_batch = jazzhr_cache.get_batch(survey_ids)
+            
             jazzhr_results = {}
             uncached_surveys = []
             
@@ -993,7 +1019,6 @@ def display_surveys(page, search_query, refresh_trigger, n_intervals):
         
         try:
             survey_items, uploadable_ids, surveys_data = build_survey_display(surveys, jazzhr_results, pdf_sizes)
-            log(f"Built display: {len(survey_items)} items, {len(uploadable_ids)} uploadable", "WARN")
         except Exception as e:
             log(f"ERROR building survey display: {e}", "ERROR")
             import traceback
@@ -1018,9 +1043,8 @@ def display_surveys(page, search_query, refresh_trigger, n_intervals):
             page_info = f"Page {page} of {total_pages} ({total_count:,} surveys)"
         
         elapsed = time.time() - start_time
-        updated_text = f"Updated: {datetime.now().strftime('%I:%M:%S %p')} ({elapsed:.1f}s) [Cache: {jazzhr_cache.get_count()}]"
-        
-        log(f"Returning: {len(survey_items)} items, page_info={page_info}", "WARN")
+        elapsed_ms = elapsed * 1000
+        updated_text = f"Updated: {datetime.now().strftime('%I:%M:%S %p')} ({elapsed_ms:.0f}ms)"
         
         result = (
             survey_items, page_info,
@@ -1029,6 +1053,12 @@ def display_surveys(page, search_query, refresh_trigger, n_intervals):
             {"display": "none"}
         )
         _last_render_result = result
+        _last_search_query = search_query or ""
+        _last_search_page = page
+        
+        if elapsed_ms > 500:
+            log(f"Display callback took {elapsed_ms:.0f}ms", "WARN")
+        
         return result
     except Exception as e:
         log(f"ERROR in display_surveys: {e}", "ERROR")
@@ -1089,15 +1119,17 @@ def handle_pagination(prev_clicks, next_clicks, current_page):
      Output("current-page", "data", allow_duplicate=True),
      Output("search-input", "value")],
     [Input("search-input", "value"),
+     Input("search-input", "n_submit"),
      Input("clear-search-btn", "n_clicks")],
     prevent_initial_call=True
 )
-def handle_search(search_value, clear_clicks):
+def handle_search(search_value, n_submit, clear_clicks):
     triggered_id = ctx.triggered_id
     
     if triggered_id == "clear-search-btn":
         return "", 1, ""
-    elif triggered_id == "search-input":
+    elif triggered_id in ["search-input", "search-input.n_submit"]:
+        # n_submit triggers on Enter - no debounce delay
         return search_value or "", 1, dash.no_update
     
     return dash.no_update, dash.no_update, dash.no_update
@@ -1115,22 +1147,34 @@ def handle_refresh_ci(n_clicks, current_trigger):
     if not n_clicks:
         return dash.no_update, dash.no_update, dash.no_update, dash.no_update
     
-    survey_service.start_loading()
+    log("Refresh CI button clicked - starting reload process", "WARN")
+    
     survey_service.clear_cache()
     background_checker.stop_checking()
+    log("Survey cache cleared", "WARN")
     
     def _reload():
         try:
+            log("Background reload thread started", "WARN")
             survey_service.load_surveys(force_refresh=True)
             all_surveys = survey_service.get_all_surveys()
+            log(f"Reload complete, got {len(all_surveys)} surveys", "WARN")
+            
             if all_surveys:
                 recent_ids = [str(s['surveyId']) for s in all_surveys[:RECENT_SURVEY_THRESHOLD]]
                 jazzhr_cache.set_recent_surveys(recent_ids)
+                log(f"Updated recent surveys cache with {len(recent_ids)} IDs", "WARN")
+            
+            log("Starting background JazzHR checker", "WARN")
             background_checker.start_checking()
+            log("Refresh CI process fully completed", "WARN")
         except Exception as e:
             log(f"Refresh CI error: {e}", "ERROR")
+            import traceback
+            traceback.print_exc()
     
-    Thread(target=_reload, daemon=True).start()
+    Thread(target=_reload, daemon=True, name="RefreshCIThread").start()
+    log("Reload thread spawned, returning to UI", "WARN")
     
     return current_trigger + 1, "", 1, ""
 
