@@ -43,20 +43,44 @@ CLIENT_ID=A89F5B0000
 
 # JazzHR API
 JAZZHR_API_KEY=your_jazzhr_api_key
-
-# Redis (optional - defaults to file cache)
-REDIS_URL=rediss://your_redis_url
-CACHE_BACKEND=redis
 ```
 
-### Optional
+### Optional - Application Settings
 ```env
-# Application Settings
-ITEMS_PER_PAGE=15
-POLL_INTERVAL_MS=30000
-JAZZHR_CACHE_HOURS=24
-MAX_BATCH_UPLOAD=15
-MAX_WORKERS=4
+ITEMS_PER_PAGE=15                    # Surveys per page
+POLL_INTERVAL_MS=30000               # UI refresh interval (milliseconds)
+MAX_BATCH_UPLOAD=15                  # Maximum surveys per batch upload
+MAX_WORKERS=4                        # Thread pool size for parallel operations
+MAX_BACKGROUND_CHECK=250             # Maximum surveys to check in background
+RECENT_SURVEY_THRESHOLD=1000         # Recent surveys count for cache optimization
+PDF_FETCH_TIMEOUT=5                  # PDF size fetch timeout (seconds)
+```
+
+### Optional - Caching
+```env
+CACHE_BACKEND=redis                  # Cache backend: 'redis' or 'file'
+JAZZHR_CACHE_HOURS=24                # JazzHR status cache TTL (hours)
+
+# Redis Configuration (required if CACHE_BACKEND=redis)
+REDIS_URL=rediss://your_redis_url
+REDIS_CONNECT_TIMEOUT=5              # Connection timeout (seconds)
+REDIS_SOCKET_TIMEOUT=5               # Socket timeout (seconds)
+REDIS_MAX_CONNECTIONS=50             # Maximum connection pool size
+REDIS_MAX_RETRIES=2                  # Maximum retry attempts
+REDIS_HEALTH_CHECK_INTERVAL=30       # Health check interval (seconds)
+```
+
+### Optional - Upload Settings
+```env
+UPLOAD_INTERVAL_MS=1000              # Upload processing interval (milliseconds)
+UPLOAD_MAX_RETRIES=3                 # Maximum upload retry attempts
+UPLOAD_RETRY_DELAY_BASE=2            # Base retry delay (seconds)
+UPLOAD_RETRY_DELAY_MAX=10            # Maximum retry delay (seconds)
+```
+
+### Optional - Security
+```env
+SESSION_COOKIE_SECURE=True           # Enable secure cookies (HTTPS only)
 ```
 
 ## Running the Application
