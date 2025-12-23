@@ -7,7 +7,7 @@ import requests
 from io import StringIO
 from datetime import datetime
 from typing import List, Dict, Any, Optional
-from cultureindex_client_1 import CultureIndexClient, CultureIndexAuthError
+from cultureindex_client import CultureIndexClient, CultureIndexAuthError
 
 try:
     import phonenumbers
@@ -237,3 +237,4 @@ def fetch_all_surveys():
 
 if __name__ == "__main__":
     sys.exit(fetch_all_surveys())
+
