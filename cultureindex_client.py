@@ -279,6 +279,8 @@ class CultureIndexClient:
         if not self.token:
             raise CultureIndexAuthError("Not authenticated. Call login() first.")
         
+        log.warning(f"Preparing CSV export request for client {client_id}")
+        
         payload = {
             "andClause": "or",
             "Confidential": str(show_confidential).lower(),
@@ -304,6 +306,7 @@ class CultureIndexClient:
         endpoint = f"/api/Surveys/{client_id}/DataTable/MainSurveys"
         url = f"{self.config.base_url}{endpoint}"
         
+        log.warning(f"Sending CSV export POST request to {endpoint}")
         response = self.session.post(
             url,
             headers={
@@ -315,10 +318,13 @@ class CultureIndexClient:
             timeout=self.config.timeout
         )
         
+        log.warning(f"CSV export response: status={response.status_code}, size={len(response.content)} bytes")
+        
         if response.status_code == 401:
             raise CultureIndexAuthError("Token expired or invalid")
         
         response.raise_for_status()
+        log.warning(f"CSV export successful, returning {len(response.text)} characters")
         return response.text
 
 def main():
