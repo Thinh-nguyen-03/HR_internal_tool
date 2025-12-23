@@ -293,7 +293,7 @@ body {
 /* Checkbox overlay on right side, below header - doesn't affect layout */
 .survey-checkbox-overlay-container {
     position: absolute;
-    top: 82px;
+    top:78px;
     right: 28px;
     z-index: 20;
     display: flex !important;
@@ -906,11 +906,12 @@ body {
 /* Upload status */
 .upload-status {
     color: var(--brand-yellow);
-    font-size: 0.8rem;
+    font-size: 0.85rem;
     font-weight: 600;
-    margin-right: 16px;
-    min-width: 120px;
-    text-align: right;
+    margin-right: 20px;
+    min-width: 150px;
+    text-align: left;
+    white-space: nowrap;
 }
 
 /* Header right adjustments */
