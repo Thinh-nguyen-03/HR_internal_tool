@@ -7,7 +7,7 @@ import requests
 from io import StringIO
 from datetime import datetime
 from typing import List, Dict, Any, Optional
-from cultureindex_client import CultureIndexClient, CultureIndexAuthError
+from cultureindex_client_1 import CultureIndexClient, CultureIndexAuthError
 
 try:
     import phonenumbers
@@ -33,19 +33,14 @@ def format_phone_number(phone_str: Optional[str]) -> Optional[str]:
         return phone_str
     
     try:
-        # First try parsing as US number (region="US")
         parsed = phonenumbers.parse(phone_str, "US")
-        
-        # If valid US number, format with country code
         if phonenumbers.is_valid_number(parsed):
             return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.INTERNATIONAL)
     except NumberParseException:
         pass
     
-    # If US parsing failed, try parsing as international
     try:
         parsed = phonenumbers.parse(phone_str, None)
-        
         if phonenumbers.is_valid_number(parsed):
             return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.INTERNATIONAL)
     except NumberParseException:
@@ -107,7 +102,7 @@ def get_pdf_size(pdf_url: str, session: requests.Session) -> Optional[Dict[str, 
             'size_kb': file_size / 1024,
             'size_mb': file_size / (1024 * 1024)
         }
-    except:
+    except Exception:
         return None
 
 def get_survey_urls_from_csv(csv_data: str) -> Dict[str, str]:
@@ -136,7 +131,7 @@ def get_survey_urls_from_csv(csv_data: str) -> Dict[str, str]:
             
             if survey_id and survey_url:
                 survey_urls[survey_id] = survey_url
-    except:
+    except Exception:
         pass
     
     return survey_urls
