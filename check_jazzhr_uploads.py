@@ -12,6 +12,14 @@ try:
 except ImportError:
     pass
 
+try:
+    from security_utils import is_safe_url
+except ImportError:
+    # Fallback if security_utils not available (for backwards compatibility)
+    def is_safe_url(url: str, verbose: bool = False):
+        """Fallback - no validation"""
+        return True, None
+
 class JazzHRUploadChecker:
     def __init__(self, api_key: str, surveys_file: str = "culture_index_surveys.json"):
         self.api_key = api_key
@@ -380,6 +388,14 @@ class JazzHRUploadChecker:
     ) -> Dict:
         import base64
         
+        # SECURITY: Validate URL before downloading (SSRF protection)
+        is_safe, error_msg = is_safe_url(pdf_url, verbose=verbose)
+        if not is_safe:
+            error = f"Unsafe URL blocked: {error_msg}"
+            if verbose:
+                print(f"    [UPLOAD] {error}")
+            return {"success": False, "error": error}
+        
         try:
             if verbose:
                 print(f"    [UPLOAD] Downloading PDF from {pdf_url[:60]}...")
@@ -735,9 +751,6 @@ Note: Survey numbers use 1-based indexing (survey 1 is the first survey)
     if 'error' in stats:
         return 1
     
-    print("\n" + "="*60)
-    print("SUMMARY")
-    print("="*60)
     print(f"Total surveys in file: {stats['total']}")
     if 'range_start' in stats:
         print(f"Range checked: surveys {stats['range_start']}-{stats['range_end']} ({stats['checked_in_range']} surveys)")
@@ -750,9 +763,7 @@ Note: Survey numbers use 1-based indexing (survey 1 is the first survey)
     
     if 'performance' in stats:
         perf = stats['performance']
-        print("\n" + "="*60)
         print("PERFORMANCE METRICS")
-        print("="*60)
         print(f"Total execution time: {perf['total_time']:.2f}s ({perf['total_time']/60:.1f} minutes)")
         print(f"  - Load time: {perf['load_time']:.2f}s")
         print(f"  - Processing time: {perf['processing_time']:.2f}s ({perf['processing_time']/60:.1f} minutes)")
@@ -767,9 +778,7 @@ Note: Survey numbers use 1-based indexing (survey 1 is the first survey)
         print(f"  - Average file check time: {perf['avg_file_check_time']:.3f}s")
         print(f"  - Average per survey: {perf['avg_per_survey']:.3f}s")
         
-        print("\n" + "="*60)
         print("BOTTLENECK ANALYSIS")
-        print("="*60)
         if perf['max_api_call_time'] > 5.0:
             print(f"WARNING: Slowest API call took {perf['max_api_call_time']:.2f}s")
         if perf['avg_api_call_time'] > 1.0:
@@ -786,4 +795,3 @@ Note: Survey numbers use 1-based indexing (survey 1 is the first survey)
 
 if __name__ == "__main__":
     sys.exit(main())
-
