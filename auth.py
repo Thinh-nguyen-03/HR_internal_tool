@@ -16,7 +16,7 @@ class User(UserMixin):
 
 
 class AuthManager:
-    def __init__(self, server):
+    def __init__(self, server, redis_client=None):
         self.server = server
         self.login_manager = LoginManager()
         self.login_manager.init_app(server)
@@ -24,16 +24,24 @@ class AuthManager:
         self.login_manager.session_protection = 'strong'
         
         # Rate limiting configuration
+        self.redis = redis_client
         self.login_attempts: Dict[str, list] = {}
         self.max_attempts = 5
         self.lockout_duration = 300
         
-        # Configure session
+        # Configure session with security-first defaults
+        secret_key = os.getenv('SECRET_KEY')
+        if not secret_key:
+            raise ValueError(
+                "SECRET_KEY environment variable must be set. "
+                "Generate one with: python -c \"import secrets; print(secrets.token_hex(32))\""
+            )
+        
         server.config.update(
-            SECRET_KEY=os.getenv('SECRET_KEY', os.urandom(24).hex()),
-            SESSION_COOKIE_SECURE=os.getenv('SESSION_COOKIE_SECURE', 'False').lower() == 'true',
+            SECRET_KEY=secret_key,
+            SESSION_COOKIE_SECURE=os.getenv('SESSION_COOKIE_SECURE', 'True').lower() == 'true',
             SESSION_COOKIE_HTTPONLY=True,
-            SESSION_COOKIE_SAMESITE='Lax',
+            SESSION_COOKIE_SAMESITE='Strict',  # Changed from 'Lax' for stronger CSRF protection
             PERMANENT_SESSION_LIFETIME=timedelta(hours=8),
             SESSION_COOKIE_NAME='hr_tool_session'
         )
@@ -58,6 +66,20 @@ class AuthManager:
         return username_match and password_match
     
     def is_rate_limited(self, username: str) -> bool:
+        """Check if user is rate limited (works across multiple workers with Redis)."""
+        # Use Redis for distributed rate limiting if available
+        if self.redis:
+            try:
+                key = f"login_attempts:{username}"
+                attempts = self.redis.llen(key)
+                if attempts >= self.max_attempts:
+                    return True
+                return False
+            except Exception as e:
+                print(f"Redis rate limit check failed, falling back to in-memory: {e}")
+                # Fall through to in-memory check
+        
+        # Fallback to in-memory (for development/single worker)
         current_time = time.time()
         
         if username not in self.login_attempts:
@@ -75,11 +97,34 @@ class AuthManager:
         return False
     
     def record_failed_attempt(self, username: str) -> None:
+        """Record a failed login attempt (persists across workers with Redis)."""
+        # Use Redis for distributed tracking if available
+        if self.redis:
+            try:
+                key = f"login_attempts:{username}"
+                self.redis.rpush(key, time.time())
+                self.redis.expire(key, self.lockout_duration)
+                return
+            except Exception as e:
+                print(f"Redis failed attempt recording failed, falling back to in-memory: {e}")
+                # Fall through to in-memory tracking
+        
+        # Fallback to in-memory (for development/single worker)
         if username not in self.login_attempts:
             self.login_attempts[username] = []
         self.login_attempts[username].append(time.time())
     
     def clear_failed_attempts(self, username: str) -> None:
+        """Clear failed login attempts on successful login."""
+        # Clear from Redis if available
+        if self.redis:
+            try:
+                key = f"login_attempts:{username}"
+                self.redis.delete(key)
+            except Exception as e:
+                print(f"Redis clear attempts failed: {e}")
+        
+        # Also clear from in-memory cache
         if username in self.login_attempts:
             self.login_attempts[username] = []
     
@@ -116,4 +161,3 @@ def require_auth(f):
             return redirect('/login')
         return f(*args, **kwargs)
     return decorated_function
-
