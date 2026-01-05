@@ -4,8 +4,11 @@ from abc import ABC, abstractmethod
 from datetime import datetime, timedelta
 from threading import RLock
 from typing import Dict, List, Optional, Any
+from urllib.parse import urlparse, urlunparse
+
 
 class CacheBackend(ABC):
+    """Abstract base for cache implementations."""
     @abstractmethod
     def get(self, key: str) -> Optional[Dict]:
         pass
@@ -39,6 +42,8 @@ class CacheBackend(ABC):
         pass
 
 class FileCache(CacheBackend):
+    """JSON file-based cache with TTL support (for development/single-worker)."""
+    
     def __init__(self, cache_file: str, ttl_hours: int = 24):
         self.cache_file = cache_file
         self.ttl_hours = ttl_hours
@@ -77,16 +82,15 @@ class FileCache(CacheBackend):
         with self._lock:
             item = self._cache.get(key)
             if item:
-                # Permanent items never expire
                 if item.get('_permanent'):
                     return item
-                # Check TTL for non-permanent items
                 timestamp = item.get('timestamp', datetime.min)
                 if datetime.now() - timestamp < timedelta(hours=self.ttl_hours):
                     return item
             return None
     
     def get_batch(self, keys: List[str]) -> Dict[str, Optional[Dict]]:
+        """Batch get with TTL validation."""
         result = {}
         now = datetime.now()
         ttl_delta = timedelta(hours=self.ttl_hours)
@@ -94,11 +98,9 @@ class FileCache(CacheBackend):
             for key in keys:
                 item = self._cache.get(key)
                 if item:
-                    # Permanent items never expire
                     if item.get('_permanent'):
                         result[key] = item
                     else:
-                        # Check TTL for non-permanent items
                         timestamp = item.get('timestamp', datetime.min)
                         if now - timestamp < ttl_delta:
                             result[key] = item
@@ -149,16 +151,33 @@ class FileCache(CacheBackend):
             "item_count": len(self._cache)
         }
 
+def mask_redis_url(url: str) -> str:
+    """Mask username/password in Redis URL for safe logging (redis://user:pass@host -> redis://***:***@host)."""
+    try:
+        parsed = urlparse(url)
+        masked_netloc = parsed.hostname or 'unknown'
+        if parsed.port:
+            masked_netloc = f"{masked_netloc}:{parsed.port}"
+        if parsed.username or parsed.password:
+            masked_netloc = f"***:***@{masked_netloc}"
+        
+        masked = urlunparse((
+            parsed.scheme,
+            masked_netloc,
+            parsed.path,
+            parsed.params,
+            parsed.query,
+            parsed.fragment
+        ))
+        return masked
+    except Exception:
+        return "redis://***"
+
+
 class RedisCache(CacheBackend):
     """
-    Redis-based cache for production/cloud deployment.
-    
-    Features:
-    - Connection pooling with configurable limits
-    - Automatic reconnection on connection loss
-    - Graceful degradation (returns None instead of crashing)
-    - Timeout protection to prevent hanging
-    - Thread-safe operations
+    Distributed cache for production (multi-worker safe).
+    Features: connection pooling, auto-reconnect, graceful degradation, timeout protection.
     """
     
     def __init__(self, prefix: str, ttl_hours: int = 24, redis_url: str = None):
@@ -172,31 +191,24 @@ class RedisCache(CacheBackend):
         self._last_error = None
         self._connection_attempts = 0
         
-        # Configuration from environment (with safe defaults)
         self.MAX_RETRIES = int(os.getenv('REDIS_MAX_RETRIES', '2'))
         self.CONNECT_TIMEOUT = int(os.getenv('REDIS_CONNECT_TIMEOUT', '5'))
         self.SOCKET_TIMEOUT = int(os.getenv('REDIS_SOCKET_TIMEOUT', '5'))
         self.MAX_CONNECTIONS = int(os.getenv('REDIS_MAX_CONNECTIONS', '50'))
         self.HEALTH_CHECK_INTERVAL = int(os.getenv('REDIS_HEALTH_CHECK_INTERVAL', '30'))
         
-        # Import redis
         try:
             import redis as redis_module
             self._redis_module = redis_module
         except ImportError:
             raise ImportError("Redis package not installed. Run: pip install redis")
         
-        # Get URL and connect
         self.redis_url = redis_url or os.getenv('REDIS_URL', 'redis://localhost:6379')
         self._connect()
     
     def _connect(self) -> bool:
-        """
-        Establish Redis connection with proper settings.
-        Returns True if connected, False otherwise.
-        """
+        """Establish Redis connection with retry limit."""
         if self._connection_attempts >= self.MAX_RETRIES:
-            # Prevent infinite connection loops - reset after cooldown
             return False
         
         try:
@@ -214,14 +226,12 @@ class RedisCache(CacheBackend):
                 retry_on_timeout=True
             )
             
-            # Test connection
             self._redis.ping()
             self._is_connected = True
             self._last_error = None
-            self._connection_attempts = 0  # Reset on success
+            self._connection_attempts = 0
             
-            # Mask password in URL for logging
-            safe_url = self.redis_url[:30] + "..." if len(self.redis_url) > 30 else self.redis_url
+            safe_url = mask_redis_url(self.redis_url)
             print(f"[CACHE] Redis connected: {safe_url}")
             return True
             
@@ -234,16 +244,11 @@ class RedisCache(CacheBackend):
     def _ensure_connected(self) -> bool:
         if self._is_connected and self._redis:
             return True
-        
-        # Reset attempt counter if we haven't tried recently
         self._connection_attempts = 0
         return self._connect()
     
     def _safe_operation(self, operation_name: str, operation, default=None):
-        """
-        Execute a Redis operation safely with error handling.
-        Returns default value on any error (no exceptions propagated).
-        """
+        """Execute Redis operation with graceful error handling (returns default on failure)."""
         if not self._ensure_connected():
             return default
         
@@ -333,19 +338,14 @@ class RedisCache(CacheBackend):
         pass
     
     def get_count(self) -> int:
-        """
-        Get count of cached items using SCAN (safe for production).
-        Returns 0 on error.
-        """
+        """Get cached item count using SCAN (non-blocking)."""
         def do_count():
             count = 0
             cursor = 0
             pattern = f"{self.prefix}:*"
             
-            # Use SCAN instead of KEYS to avoid blocking Redis
             while True:
                 cursor, keys = self._redis.scan(cursor, match=pattern, count=100)
-                # Exclude permanent flag keys
                 count += len([k for k in keys if ':perm:' not in k])
                 if cursor == 0:
                     break
@@ -357,20 +357,15 @@ class RedisCache(CacheBackend):
         return self._version
     
     def get_all_keys(self) -> List[str]:
-        """
-        Get all keys in cache using SCAN (safe for production).
-        Returns empty list on error.
-        """
+        """Get all cache keys using SCAN (non-blocking)."""
         def do_keys():
             all_keys = []
             cursor = 0
             pattern = f"{self.prefix}:*"
             prefix_len = len(self.prefix) + 1
             
-            # Use SCAN instead of KEYS to avoid blocking Redis
             while True:
                 cursor, keys = self._redis.scan(cursor, match=pattern, count=100)
-                # Remove prefix and exclude perm keys
                 all_keys.extend([k[prefix_len:] for k in keys if ':perm:' not in k])
                 if cursor == 0:
                     break
@@ -386,18 +381,9 @@ class RedisCache(CacheBackend):
             "ttl_hours": self.ttl_hours
         }
 
+
 def create_cache(name: str, ttl_hours: int = 24, cache_file: str = None) -> CacheBackend:
-    """
-    Create cache based on CACHE_BACKEND environment variable.
-    
-    Args:
-        name: Cache name (used as prefix for Redis, or default filename for file)
-        ttl_hours: TTL for non-permanent items
-        cache_file: Optional file path for file backend
-    
-    Returns:
-        CacheBackend instance
-    """
+    """Create cache backend based on CACHE_BACKEND env var (redis or file)."""
     backend = os.getenv('CACHE_BACKEND', 'file').lower()
     
     if backend == 'redis':
@@ -406,11 +392,18 @@ def create_cache(name: str, ttl_hours: int = 24, cache_file: str = None) -> Cach
         file_path = cache_file or f"{name}_cache.json"
         return FileCache(cache_file=file_path, ttl_hours=ttl_hours)
 
+
 class SmartJazzHRCache:
+    """
+    Intelligent cache with dynamic TTL:
+    - Recent surveys (configurable threshold): Respect TTL for frequent updates
+    - Old surveys: Permanent cache (historical data unlikely to change)
+    """
+    
     def __init__(self, cache: CacheBackend, recent_threshold: int = 2000):
         self.cache = cache
         self.recent_threshold = recent_threshold
-        self._recent_survey_ids = set()  # Track which surveys are "recent"
+        self._recent_survey_ids = set()
     
     def set_recent_surveys(self, survey_ids: List[str]):
         self._recent_survey_ids = set(str(sid) for sid in survey_ids[:self.recent_threshold])
@@ -421,17 +414,13 @@ class SmartJazzHRCache:
     def get(self, survey_id: str) -> Optional[Dict]:
         survey_id = str(survey_id)
         if self.is_recent(survey_id):
-            # Recent survey - respect TTL
             return self.cache.get(survey_id)
         else:
-            # Old survey - permanent cache (ignore TTL)
             return self.cache.get_permanent(survey_id)
     
     def get_batch(self, survey_ids: List[str]) -> Dict[str, Optional[Dict]]:
         if not survey_ids:
             return {}
-        
-        # Use batch get from underlying cache
         str_ids = [str(sid) for sid in survey_ids]
         return self.cache.get_batch(str_ids)
     
@@ -465,4 +454,3 @@ class SmartJazzHRCache:
         if hasattr(self.cache, 'is_healthy'):
             return self.cache.is_healthy()
         return {"connected": True, "type": "file"}
-
