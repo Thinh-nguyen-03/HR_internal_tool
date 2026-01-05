@@ -25,30 +25,26 @@ except ImportError:
         import pytz
         ZoneInfo = pytz.timezone
 
+
 def format_phone_number(phone_str: Optional[str]) -> Optional[str]:
-    if not phone_str or not phone_str.strip():
+    """Format phone number to international format (E.164) if valid."""
+    if not phone_str or not phone_str.strip() or not PHONENUMBERS_AVAILABLE:
         return phone_str
     
-    if not PHONENUMBERS_AVAILABLE:
-        return phone_str
-    
-    try:
-        parsed = phonenumbers.parse(phone_str, "US")
-        if phonenumbers.is_valid_number(parsed):
-            return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.INTERNATIONAL)
-    except NumberParseException:
-        pass
-    
-    try:
-        parsed = phonenumbers.parse(phone_str, None)
-        if phonenumbers.is_valid_number(parsed):
-            return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.INTERNATIONAL)
-    except NumberParseException:
-        pass
+    # Try US format first, then fallback to auto-detection
+    for region in ["US", None]:
+        try:
+            parsed = phonenumbers.parse(phone_str, region)
+            if phonenumbers.is_valid_number(parsed):
+                return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.INTERNATIONAL)
+        except NumberParseException:
+            continue
     
     return phone_str
 
+
 def convert_to_central_date(date_str: Optional[str]) -> Optional[str]:
+    """Convert ISO timestamp to Central Time MM/DD/YYYY format."""
     if not date_str:
         return None
     
@@ -58,6 +54,7 @@ def convert_to_central_date(date_str: Optional[str]) -> Optional[str]:
         
         dt = datetime.fromisoformat(date_str)
         
+        # Ensure timezone aware
         if dt.tzinfo is None:
             try:
                 dt = dt.replace(tzinfo=ZoneInfo("UTC"))
@@ -65,6 +62,7 @@ def convert_to_central_date(date_str: Optional[str]) -> Optional[str]:
                 import pytz
                 dt = pytz.UTC.localize(dt)
         
+        # Convert to Central Time
         try:
             central_tz = ZoneInfo("America/Chicago")
             central_dt = dt.astimezone(central_tz)
@@ -77,13 +75,20 @@ def convert_to_central_date(date_str: Optional[str]) -> Optional[str]:
     except (ValueError, AttributeError, TypeError):
         return None
 
+
 def get_pdf_size(pdf_url: str, session: requests.Session) -> Optional[Dict[str, Any]]:
+    """Fetch PDF file size using HTTP Range header (efficient, no full download)."""
     if not pdf_url or not pdf_url.strip():
         return None
     
     try:
-        headers = {'Range': 'bytes=0-0'}
-        response = session.get(pdf_url, headers=headers, allow_redirects=True, timeout=10, stream=True)
+        response = session.get(
+            pdf_url,
+            headers={'Range': 'bytes=0-0'},
+            allow_redirects=True,
+            timeout=10,
+            stream=True
+        )
         response.raise_for_status()
         
         file_size = 0
@@ -105,12 +110,18 @@ def get_pdf_size(pdf_url: str, session: requests.Session) -> Optional[Dict[str, 
     except Exception:
         return None
 
+
 def get_survey_urls_from_csv(csv_data: str) -> Dict[str, str]:
+    """
+    Extract survey report URLs from Culture Index CSV export.
+    Handles BOM characters and various column naming formats.
+    """
     survey_urls = {}
     
     try:
         csv_reader = csv.DictReader(StringIO(csv_data))
         
+        # Find relevant columns (handle BOM and formatting variations)
         survey_id_col = None
         survey_url_col = None
         
@@ -136,11 +147,13 @@ def get_survey_urls_from_csv(csv_data: str) -> Dict[str, str]:
     
     return survey_urls
 
+
 def extract_survey_info(
     survey: Dict[str, Any],
     survey_url: Optional[str] = None,
     pdf_size_info: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
+    """Transform raw survey data into standardized format."""
     return {
         "surveyId": survey.get("surveyId"),
         "traitPattern": survey.get("traitPattern"),
@@ -156,7 +169,9 @@ def extract_survey_info(
         "pdfSizeMB": pdf_size_info.get('size_mb') if pdf_size_info else None,
     }
 
+
 def fetch_all_surveys():
+    """Batch fetch all surveys from Culture Index API and save to JSON file."""
     email = os.getenv("CULTUREINDEX_EMAIL")
     password = os.getenv("CULTUREINDEX_PASSWORD")
     client_id = "A89F5B0000"
@@ -237,4 +252,3 @@ def fetch_all_surveys():
 
 if __name__ == "__main__":
     sys.exit(fetch_all_surveys())
-
