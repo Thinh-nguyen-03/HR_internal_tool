@@ -29,16 +29,13 @@ logging.basicConfig(
 log = logging.getLogger("cultureindex")
 
 class CultureIndexAuthError(Exception):
-    """Raised when authentication fails or token is invalid."""
     pass
 
 class CultureIndexAPIError(Exception):
-    """Raised when API request fails."""
     pass
 
 @dataclass(frozen=True)
 class CultureIndexConfig:
-    """Configuration for Culture Index API client."""
     base_url: str = DEFAULT_BASE_URL
     timeout: tuple[int, int] = DEFAULT_TIMEOUT
 
@@ -74,8 +71,10 @@ class CultureIndexClient:
         remember: bool = True,
         timezone_offset: Optional[int] = None,
     ) -> dict[str, Any]:
+        """Authenticate with Culture Index API and store bearer token."""
         login_url = f"{self.config.base_url}/api/identity/Login"
         
+        # Auto-detect timezone offset if not provided
         if timezone_offset is None:
             try:
                 now = datetime.now(timezone.utc).astimezone()
@@ -105,6 +104,7 @@ class CultureIndexClient:
                 timeout=self.config.timeout,
             )
             
+            # Parse validation errors from API response
             if response.status_code == 400:
                 error_message = "Bad Request (400): Invalid request parameters"
                 try:
@@ -155,6 +155,7 @@ class CultureIndexClient:
         }
     
     def get(self, endpoint: str, **kwargs) -> dict[str, Any]:
+        """Make authenticated GET request to Culture Index API."""
         if not self.token:
             raise CultureIndexAuthError("Not authenticated. Call login() first.")
         
@@ -168,6 +169,7 @@ class CultureIndexClient:
         return response.json()
     
     def post(self, endpoint: str, data: Optional[dict] = None, **kwargs) -> dict[str, Any]:
+        """Make authenticated POST request to Culture Index API."""
         if not self.token:
             raise CultureIndexAuthError("Not authenticated. Call login() first.")
         
@@ -195,6 +197,7 @@ class CultureIndexClient:
         confidential: str = "false",
         show_hidden: str = "false",
     ) -> dict[str, Any]:
+        """Fetch paginated survey data for a client (direction: 1=asc, 2=desc)."""
         if not self.token:
             raise CultureIndexAuthError("Not authenticated. Call login() first.")
         
@@ -225,6 +228,8 @@ class CultureIndexClient:
         client_id: str,
         max_surveys: Optional[int] = None,
     ) -> list[dict[str, Any]]:
+        """Fetch all surveys for a client (queries count first, then fetches in single request)."""
+        # Get total count first
         response = self.get_surveys(
             client_id=client_id,
             start=0,
@@ -239,6 +244,7 @@ class CultureIndexClient:
         if max_surveys:
             fetch_count = min(max_surveys, records_total)
         
+        # Fetch all at once
         response = self.get_surveys(
             client_id=client_id,
             start=0,
@@ -253,6 +259,7 @@ class CultureIndexClient:
         start: int,
         batch_size: int = 500,
     ) -> tuple[list[dict[str, Any]], int]:
+        """Fetch survey batch and return (surveys, total_count)."""
         response = self.get_surveys(
             client_id=client_id,
             start=start,
@@ -276,6 +283,7 @@ class CultureIndexClient:
         sort_by: str = 'surveyDate',
         sort_direction: int = 2
     ) -> str:
+        """Export surveys as CSV (includes survey report URLs not available in JSON API)."""
         if not self.token:
             raise CultureIndexAuthError("Not authenticated. Call login() first.")
         
