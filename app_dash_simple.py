@@ -15,7 +15,7 @@ from flask import redirect, request, session
 from flask_login import current_user, logout_user
 from flask_wtf.csrf import CSRFProtect
 
-from cultureindex_client import CultureIndexClient
+from cultureindex_client import CultureIndexClient, CultureIndexAuthError
 from surveys_fetch import format_phone_number
 from check_jazzhr_uploads import JazzHRUploadChecker
 from cache_storage import create_cache, SmartJazzHRCache
@@ -182,7 +182,23 @@ class SimpleSurveyService:
             
             log(f"Downloading CSV data for client {self.client_id}...", "WARN")
             csv_start = time.time()
-            csv_data = client.export_surveys_csv(client_id=self.client_id)
+            
+            # Try to export surveys, retry once if token expired
+            max_retries = 2
+            for attempt in range(max_retries):
+                try:
+                    csv_data = client.export_surveys_csv(client_id=self.client_id)
+                    break  # Success, exit retry loop
+                except CultureIndexAuthError as auth_error:
+                    if "Token expired or invalid" in str(auth_error) and attempt < max_retries - 1:
+                        log("Token expired, re-authenticating...", "WARN")
+                        # Clear the client to force re-authentication
+                        self._client = None
+                        client = self._get_client()
+                        log("Re-authentication successful, retrying request...", "WARN")
+                    else:
+                        raise  # Re-raise if not token expiry or last attempt
+            
             log(f"CSV download completed in {time.time()-csv_start:.1f}s, size: {len(csv_data)} bytes", "WARN")
             
             log("Parsing CSV data...", "WARN")
