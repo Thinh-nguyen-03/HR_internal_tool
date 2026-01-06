@@ -41,7 +41,7 @@ class AuthManager:
             SECRET_KEY=secret_key,
             SESSION_COOKIE_SECURE=os.getenv('SESSION_COOKIE_SECURE', 'True').lower() == 'true',
             SESSION_COOKIE_HTTPONLY=True,
-            SESSION_COOKIE_SAMESITE='Strict',  # Changed from 'Lax' for stronger CSRF protection
+            SESSION_COOKIE_SAMESITE='Lax',
             PERMANENT_SESSION_LIFETIME=timedelta(hours=8),
             SESSION_COOKIE_NAME='hr_tool_session'
         )
