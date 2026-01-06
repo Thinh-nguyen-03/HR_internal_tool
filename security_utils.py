@@ -10,7 +10,8 @@ ALLOWED_SCHEMES = ['https']
 ALLOWED_DOMAINS = [
     'portal.cultureindex.com',
     'cultureindex.com',
-    'www.cultureindex.com'
+    'www.cultureindex.com',
+    'surveys.cultureindex.com'  # Survey PDF URLs
 ]
 
 # Additional domains via ALLOWED_PDF_DOMAINS environment variable
