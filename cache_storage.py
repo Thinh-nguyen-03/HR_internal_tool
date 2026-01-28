@@ -14,32 +14,20 @@ def validate_cache_entry(entry: Dict) -> bool:
     if not isinstance(entry, dict):
         return False
     
-    # Check for required fields
+    if '_cache_version' not in entry:
+        return False
+    
+    if entry.get('_cache_version') != CACHE_ENTRY_VERSION:
+        return False
+    
+    if 'timestamp' not in entry:
+        return False
+    
     required_fields = {'status', 'isUploaded'}
     if not required_fields.issubset(entry.keys()):
         return False
     
     return True
-
-
-def migrate_cache_entry(entry: Dict) -> Dict:
-    """Migrate old cache entries to current version format."""
-    if not isinstance(entry, dict):
-        return entry
-    
-    # Add version if missing (migration from v0 to v1)
-    if '_cache_version' not in entry:
-        entry['_cache_version'] = CACHE_ENTRY_VERSION
-    
-    # Add timestamp if missing
-    if 'timestamp' not in entry:
-        entry['timestamp'] = datetime.now()
-    
-    # Ensure version is current
-    if entry.get('_cache_version') != CACHE_ENTRY_VERSION:
-        entry['_cache_version'] = CACHE_ENTRY_VERSION
-    
-    return entry
 
 
 class CacheBackend(ABC):
@@ -94,22 +82,12 @@ class FileCache(CacheBackend):
             if os.path.exists(self.cache_file):
                 with open(self.cache_file, 'r') as f:
                     data = json.load(f)
-                    migrated_count = 0
                     for key, value in data.items():
                         if 'timestamp' in value and isinstance(value['timestamp'], str):
                             value['timestamp'] = datetime.fromisoformat(value['timestamp'])
-                        
-                        # Migrate old entries during load
-                        if validate_cache_entry(value):
-                            if '_cache_version' not in value or value.get('_cache_version') != CACHE_ENTRY_VERSION:
-                                value = migrate_cache_entry(value)
-                                migrated_count += 1
-                            self._cache[key] = value
-                    
-                    if migrated_count > 0:
-                        print(f"[CACHE] Migrated {migrated_count} entries to version {CACHE_ENTRY_VERSION}")
-        except Exception as e:
-            print(f"[CACHE] File load error: {e}")
+                        self._cache[key] = value
+        except Exception:
+            pass  # Silent fail on load
     
     def save(self):
         try:
@@ -122,8 +100,8 @@ class FileCache(CacheBackend):
                     data[key] = serialized
             with open(self.cache_file, 'w') as f:
                 json.dump(data, f, indent=2)
-        except Exception as e:
-            print(f"[CACHE] File save error: {e}")
+        except Exception:
+            pass  # Silent fail on save
     
     def get(self, key: str) -> Optional[Dict]:
         with self._lock:
@@ -133,28 +111,17 @@ class FileCache(CacheBackend):
                 if not validate_cache_entry(item):
                     self._misses += 1
                     del self._cache[key]
-                    print(f"[CACHE] Invalid entry removed: {key}")
                     return None
-                
-                # Migrate old entries to current version
-                if '_cache_version' not in item or item.get('_cache_version') != CACHE_ENTRY_VERSION:
-                    item = migrate_cache_entry(item)
-                    self._cache[key] = item
                 
                 if item.get('_permanent'):
                     self._hits += 1
-                    print(f"[CACHE] HIT (permanent): {key}")
                     return item
                 timestamp = item.get('timestamp', datetime.min)
                 age = datetime.now() - timestamp
                 if age < timedelta(hours=self.ttl_hours):
                     self._hits += 1
-                    print(f"[CACHE] HIT (age: {age.total_seconds():.0f}s): {key}")
                     return item
-                else:
-                    print(f"[CACHE] EXPIRED (age: {age.total_seconds():.0f}s): {key}")
             self._misses += 1
-            print(f"[CACHE] MISS: {key}")
             return None
     
     def get_batch(self, keys: List[str]) -> Dict[str, Optional[Dict]]:
@@ -314,15 +281,11 @@ class RedisCache(CacheBackend):
             self._is_connected = True
             self._last_error = None
             self._connection_attempts = 0
-            
-            safe_url = mask_redis_url(self.redis_url)
-            print(f"[CACHE] Redis connected: {safe_url}")
             return True
             
         except Exception as e:
             self._is_connected = False
             self._last_error = str(e)
-            print(f"[CACHE] Redis connection failed (attempt {self._connection_attempts}): {e}")
             return False
     
     def _ensure_connected(self) -> bool:
@@ -341,13 +304,10 @@ class RedisCache(CacheBackend):
         except self._redis_module.ConnectionError as e:
             self._is_connected = False
             self._last_error = str(e)
-            print(f"[CACHE] Redis connection lost during {operation_name}: {e}")
             return default
-        except self._redis_module.TimeoutError as e:
-            print(f"[CACHE] Redis timeout during {operation_name}: {e}")
+        except self._redis_module.TimeoutError:
             return default
-        except Exception as e:
-            print(f"[CACHE] Redis {operation_name} error: {e}")
+        except Exception:
             return default
     
     def _key(self, key: str) -> str:
@@ -364,30 +324,16 @@ class RedisCache(CacheBackend):
             if data:
                 try:
                     item = json.loads(data)
-                    
                     # Validate cache entry
                     if not validate_cache_entry(item):
                         self._redis.delete(self._key(key))
                         with self._lock:
                             self._misses += 1
                         return None
-                    
-                    # Migrate old entries to current version
-                    if '_cache_version' not in item or item.get('_cache_version') != CACHE_ENTRY_VERSION:
-                        item = migrate_cache_entry(item)
-                        # Save migrated entry back to Redis
-                        migrated_data = json.dumps(item)
-                        ttl = self._redis.ttl(self._key(key))
-                        if ttl > 0:
-                            self._redis.setex(self._key(key), ttl, migrated_data)
-                        else:
-                            self._redis.set(self._key(key), migrated_data)
-                    
                     with self._lock:
                         self._hits += 1
                     return item
-                except (json.JSONDecodeError, TypeError) as e:
-                    print(f"[CACHE] Invalid JSON in Redis: {key}")
+                except (json.JSONDecodeError, TypeError):
                     self._redis.delete(self._key(key))
                     with self._lock:
                         self._misses += 1
@@ -437,8 +383,6 @@ class RedisCache(CacheBackend):
             return result
         
         success = self._safe_operation("set", do_set, default=False)
-        if not success and not self._is_connected:
-            print(f"[CACHE] WARNING: Failed to set key '{key}' - Redis disconnected")
         return success or False
     
     def delete(self, key: str):
@@ -558,9 +502,6 @@ class SmartJazzHRCache:
         survey_id = str(survey_id)
         is_permanent = not self.is_recent(survey_id)
         success = self.cache.set(survey_id, value, permanent=is_permanent)
-        if not success:
-            cache_type = "permanent" if is_permanent else f"{self.cache.ttl_hours}h TTL"
-            print(f"[CACHE] WARNING: Failed to cache survey {survey_id} ({cache_type})")
         return success
     
     def delete(self, survey_id: str):
