@@ -82,4 +82,3 @@ def create_login_layout(error_message=None):
         'minHeight': '100vh',
         'width': '100%'
     })
-
