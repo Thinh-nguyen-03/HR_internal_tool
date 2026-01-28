@@ -162,4 +162,3 @@ def validate_integer_param(value: any, param_name: str, min_val: int = None, max
         return False, None, f"{param_name} must be at most {max_val}"
     
     return True, int_val, None
-
