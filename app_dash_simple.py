@@ -1555,10 +1555,11 @@ _individual_refresh_lock = RLock()
      Output("upload-status", "children", allow_duplicate=True)],
     Input({"type": "refresh-single-btn", "index": ALL}, "n_clicks"),
     [State({"type": "refresh-single-btn", "index": ALL}, "id"),
-     State("refresh-trigger", "data")],
+     State("refresh-trigger", "data"),
+     State("current-surveys-data", "data")],
     prevent_initial_call=True
 )
-def handle_refresh_single(n_clicks_list, button_ids, current_trigger):
+def handle_refresh_single(n_clicks_list, button_ids, current_trigger, surveys_data):
     ctx = dash.callback_context
     if not ctx.triggered:
         return dash.no_update, dash.no_update
@@ -1590,15 +1591,48 @@ def handle_refresh_single(n_clicks_list, button_ids, current_trigger):
                     return dash.no_update, dash.no_update
                 _last_individual_refresh[survey_id] = current_time
             
-            log(f"Individual refresh for survey {survey_id} (n_clicks={triggered_value})", "WARN")
+            log(f"Individual refresh for survey {survey_id} - checking this survey only", "WARN")
             
+            # Clear cache for this survey
             if jazzhr_cache.get(survey_id):
                 jazzhr_cache.delete(survey_id)
                 jazzhr_cache.save()
-                log(f"Cleared status for survey {survey_id}", "WARN")
             
-            # Trigger refresh without invalidating entire cache
-            return current_trigger + 1, f"Refreshing status for survey {survey_id}..."
+            # Find the survey data
+            survey = None
+            if surveys_data:
+                for s in surveys_data:
+                    if str(s.get('surveyId')) == str(survey_id):
+                        survey = s
+                        break
+            
+            if survey:
+                # Get name for display
+                first_name = survey.get('firstName', '')
+                last_name = survey.get('lastName', '')
+                pdf_url = survey.get('pdf_url')
+                
+                # Check just this one survey in background
+                def check_single():
+                    try:
+                        if pdf_url:
+                            pdf_sizes = fetch_pdf_sizes({survey_id: pdf_url}, pdf_size_cache)
+                        else:
+                            pdf_sizes = {}
+                        
+                        jazzhr_service.check_surveys_batch([survey], {survey_id: pdf_url}, pdf_sizes)
+                        log(f"Completed individual check for survey {survey_id}", "WARN")
+                    except Exception as e:
+                        log(f"Error checking survey {survey_id}: {e}", "ERROR")
+                
+                Thread(target=check_single, daemon=True).start()
+                
+                # Trigger UI refresh to show "Checking..." state
+                full_name = f"{first_name} {last_name}".strip() or f"survey {survey_id}"
+                return current_trigger + 1, f"Refreshing status for {full_name}..."
+            else:
+                log(f"Survey {survey_id} not found in current page data", "WARN")
+                return current_trigger + 1, f"Refreshing status for survey {survey_id}..."
     except Exception as e:
         log(f"Error in individual refresh: {e}", "ERROR")
     
