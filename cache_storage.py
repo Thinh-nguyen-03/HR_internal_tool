@@ -6,6 +6,29 @@ from threading import RLock
 from typing import Dict, List, Optional, Any
 from urllib.parse import urlparse, urlunparse
 
+CACHE_ENTRY_VERSION = 1
+
+
+def validate_cache_entry(entry: Dict) -> bool:
+    """Validate cache entry structure and version."""
+    if not isinstance(entry, dict):
+        return False
+    
+    if '_cache_version' not in entry:
+        return False
+    
+    if entry.get('_cache_version') != CACHE_ENTRY_VERSION:
+        return False
+    
+    if 'timestamp' not in entry:
+        return False
+    
+    required_fields = {'status', 'isUploaded'}
+    if not required_fields.issubset(entry.keys()):
+        return False
+    
+    return True
+
 
 class CacheBackend(ABC):
     """Abstract base for cache implementations."""
@@ -50,6 +73,8 @@ class FileCache(CacheBackend):
         self._cache = {}
         self._lock = RLock()
         self._version = 0
+        self._hits = 0
+        self._misses = 0
         self._load()
     
     def _load(self):
@@ -82,11 +107,27 @@ class FileCache(CacheBackend):
         with self._lock:
             item = self._cache.get(key)
             if item:
+                # Validate cache entry
+                if not validate_cache_entry(item):
+                    self._misses += 1
+                    del self._cache[key]
+                    print(f"[CACHE] Corrupted entry removed: {key}")
+                    return None
+                
                 if item.get('_permanent'):
+                    self._hits += 1
+                    print(f"[CACHE] HIT (permanent): {key}")
                     return item
                 timestamp = item.get('timestamp', datetime.min)
-                if datetime.now() - timestamp < timedelta(hours=self.ttl_hours):
+                age = datetime.now() - timestamp
+                if age < timedelta(hours=self.ttl_hours):
+                    self._hits += 1
+                    print(f"[CACHE] HIT (age: {age.total_seconds():.0f}s): {key}")
                     return item
+                else:
+                    print(f"[CACHE] EXPIRED (age: {age.total_seconds():.0f}s): {key}")
+            self._misses += 1
+            print(f"[CACHE] MISS: {key}")
             return None
     
     def get_batch(self, keys: List[str]) -> Dict[str, Optional[Dict]]:
@@ -118,6 +159,7 @@ class FileCache(CacheBackend):
         with self._lock:
             value = value.copy()
             value['timestamp'] = datetime.now()
+            value['_cache_version'] = CACHE_ENTRY_VERSION
             if permanent:
                 value['_permanent'] = True
             self._cache[key] = value
@@ -143,12 +185,25 @@ class FileCache(CacheBackend):
     def ping(self) -> bool:
         return True
     
+    def get_stats(self) -> Dict:
+        """Get cache statistics including hit/miss rates."""
+        total = self._hits + self._misses
+        hit_rate = (self._hits / total * 100) if total > 0 else 0
+        return {
+            "hits": self._hits,
+            "misses": self._misses,
+            "total_requests": total,
+            "hit_rate_percent": round(hit_rate, 2)
+        }
+    
     def is_healthy(self) -> Dict:
+        stats = self.get_stats()
         return {
             "connected": True,
             "type": "file",
             "cache_file": self.cache_file,
-            "item_count": len(self._cache)
+            "item_count": len(self._cache),
+            "stats": stats
         }
 
 def mask_redis_url(url: str) -> str:
@@ -190,6 +245,8 @@ class RedisCache(CacheBackend):
         self._is_connected = False
         self._last_error = None
         self._connection_attempts = 0
+        self._hits = 0
+        self._misses = 0
         
         self.MAX_RETRIES = int(os.getenv('REDIS_MAX_RETRIES', '2'))
         self.CONNECT_TIMEOUT = int(os.getenv('REDIS_CONNECT_TIMEOUT', '5'))
@@ -278,7 +335,26 @@ class RedisCache(CacheBackend):
         def do_get():
             data = self._redis.get(self._key(key))
             if data:
-                return json.loads(data)
+                try:
+                    item = json.loads(data)
+                    # Validate cache entry
+                    if not validate_cache_entry(item):
+                        self._redis.delete(self._key(key))
+                        print(f"[CACHE] Corrupted Redis entry removed: {key}")
+                        with self._lock:
+                            self._misses += 1
+                        return None
+                    with self._lock:
+                        self._hits += 1
+                    return item
+                except (json.JSONDecodeError, TypeError) as e:
+                    print(f"[CACHE] Invalid JSON in Redis, removing: {key} - {e}")
+                    self._redis.delete(self._key(key))
+                    with self._lock:
+                        self._misses += 1
+                    return None
+            with self._lock:
+                self._misses += 1
             return None
         return self._safe_operation("get", do_get, default=None)
     
@@ -309,6 +385,7 @@ class RedisCache(CacheBackend):
         def do_set():
             value_copy = value.copy()
             value_copy['timestamp'] = datetime.now().isoformat()
+            value_copy['_cache_version'] = CACHE_ENTRY_VERSION
             data = json.dumps(value_copy)
             
             if permanent:
@@ -373,12 +450,26 @@ class RedisCache(CacheBackend):
             return all_keys
         return self._safe_operation("get_all_keys", do_keys, default=[]) or []
     
+    def get_stats(self) -> Dict:
+        """Get cache statistics including hit/miss rates."""
+        with self._lock:
+            total = self._hits + self._misses
+            hit_rate = (self._hits / total * 100) if total > 0 else 0
+            return {
+                "hits": self._hits,
+                "misses": self._misses,
+                "total_requests": total,
+                "hit_rate_percent": round(hit_rate, 2)
+            }
+    
     def is_healthy(self) -> Dict:
+        stats = self.get_stats()
         return {
             "connected": self._is_connected,
             "last_error": self._last_error,
             "prefix": self.prefix,
-            "ttl_hours": self.ttl_hours
+            "ttl_hours": self.ttl_hours,
+            "stats": stats
         }
 
 
@@ -454,3 +545,4 @@ class SmartJazzHRCache:
         if hasattr(self.cache, 'is_healthy'):
             return self.cache.is_healthy()
         return {"connected": True, "type": "file"}
+
