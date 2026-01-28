@@ -314,12 +314,12 @@ class SimpleJazzHRService:
         last_name = survey.get('lastName', '').strip()
         
         if not first_name or not last_name:
-            result = {"status": "MISSING_NAME", "isUploaded": False}
+            result = {"status": "MISSING_NAME", "isUploaded": False, "timestamp": datetime.now()}
             self.cache.set(survey_id, result)
             return result
         
         if not pdf_url:
-            result = {"status": "NO_PDF_URL", "isUploaded": False}
+            result = {"status": "NO_PDF_URL", "isUploaded": False, "timestamp": datetime.now()}
             self.cache.set(survey_id, result)
             return result
         
@@ -330,7 +330,7 @@ class SimpleJazzHRService:
             applicant = checker.search_applicant_by_name(first_name, last_name, verbose=False)
             
             if not applicant:
-                result = {"status": "NOT_IN_JAZZHR", "isUploaded": False}
+                result = {"status": "NOT_IN_JAZZHR", "isUploaded": False, "timestamp": datetime.now()}
                 self.cache.set(survey_id, result)
                 return result
             
@@ -348,7 +348,8 @@ class SimpleJazzHRService:
                     "isUploaded": True,
                     "match": match,
                     "file_count": len(files),
-                    "had_pdf_size": pdf_size is not None
+                    "had_pdf_size": pdf_size is not None,
+                    "timestamp": datetime.now()
                 }
             else:
                 result = {
@@ -356,7 +357,8 @@ class SimpleJazzHRService:
                     "applicantId": applicant_id,
                     "isUploaded": False,
                     "file_count": len(files),
-                    "had_pdf_size": pdf_size is not None
+                    "had_pdf_size": pdf_size is not None,
+                    "timestamp": datetime.now()
                 }
             
             # Track status changes to detect false positives/negatives
@@ -377,7 +379,7 @@ class SimpleJazzHRService:
             
         except Exception as e:
             log(f"JazzHR error for {survey_id}: {e}", "ERROR")
-            return {"status": "ERROR", "isUploaded": False, "error": str(e)}
+            return {"status": "ERROR", "isUploaded": False, "error": str(e), "timestamp": datetime.now()}
     
     def check_surveys_batch(self, surveys: List[Dict], urls: Dict[str, str], pdf_sizes: Dict[str, int]) -> Dict[str, Dict]:
         results = {}
@@ -1075,13 +1077,11 @@ def build_survey_display(surveys: List[Dict], jazzhr_results: Dict, pdf_sizes: D
             ], className="survey-info"),
             
             html.Div([
-                html.Div([
-                    html.Span("Last Checked: ", className="last-checked-label"),
-                    html.Span(
-                        format_time_ago(jazzhr.get('timestamp')) if jazzhr.get('timestamp') else "Not checked yet",
-                        className="last-checked-value"
-                    ),
-                ], className="last-checked-info"),
+                html.Span(
+                    format_time_ago(jazzhr.get('timestamp')) if jazzhr.get('timestamp') else "Never checked",
+                    className="last-checked-value",
+                    title=f"Last checked: {jazzhr.get('timestamp').strftime('%Y-%m-%d %I:%M %p') if jazzhr.get('timestamp') else 'Never'}"
+                ),
                 html.Button(
                     "Refresh Status",
                     id={"type": "refresh-single-btn", "index": survey_id},
@@ -1354,7 +1354,8 @@ def display_surveys(page, search_query, refresh_trigger, background_signal):
                 log(f"Surveys APPEARED in display: {list(appeared)[:5]}", "WARN")
         _last_displayed_surveys = current_survey_ids
         
-        upload_status_msg = "" if triggered_id == "refresh-trigger" else dash.no_update
+        # Clear upload status on refresh or background check signal
+        upload_status_msg = "" if triggered_id in ["refresh-trigger", "background-check-signal"] else dash.no_update
         
         result = (
             survey_items, page_info,
