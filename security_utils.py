@@ -108,4 +108,3 @@ def get_safe_url_info() -> dict:
         "allowed_domains": ALLOWED_DOMAINS,
         "extra_domains_from_env": EXTRA_ALLOWED_DOMAINS
     }
-
