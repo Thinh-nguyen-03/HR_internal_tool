@@ -314,12 +314,12 @@ class SimpleJazzHRService:
         last_name = survey.get('lastName', '').strip()
         
         if not first_name or not last_name:
-            result = {"status": "MISSING_NAME", "isUploaded": False, "timestamp": datetime.now()}
+            result = {"status": "MISSING_NAME", "isUploaded": False, "timestamp": datetime.now().isoformat()}
             self.cache.set(survey_id, result)
             return result
         
         if not pdf_url:
-            result = {"status": "NO_PDF_URL", "isUploaded": False, "timestamp": datetime.now()}
+            result = {"status": "NO_PDF_URL", "isUploaded": False, "timestamp": datetime.now().isoformat()}
             self.cache.set(survey_id, result)
             return result
         
@@ -330,7 +330,7 @@ class SimpleJazzHRService:
             applicant = checker.search_applicant_by_name(first_name, last_name, verbose=False)
             
             if not applicant:
-                result = {"status": "NOT_IN_JAZZHR", "isUploaded": False, "timestamp": datetime.now()}
+                result = {"status": "NOT_IN_JAZZHR", "isUploaded": False, "timestamp": datetime.now().isoformat()}
                 self.cache.set(survey_id, result)
                 return result
             
@@ -349,7 +349,7 @@ class SimpleJazzHRService:
                     "match": match,
                     "file_count": len(files),
                     "had_pdf_size": pdf_size is not None,
-                    "timestamp": datetime.now()
+                    "timestamp": datetime.now().isoformat()
                 }
             else:
                 result = {
@@ -358,7 +358,7 @@ class SimpleJazzHRService:
                     "isUploaded": False,
                     "file_count": len(files),
                     "had_pdf_size": pdf_size is not None,
-                    "timestamp": datetime.now()
+                    "timestamp": datetime.now().isoformat()
                 }
             
             # Track status changes to detect false positives/negatives
@@ -379,7 +379,7 @@ class SimpleJazzHRService:
             
         except Exception as e:
             log(f"JazzHR error for {survey_id}: {e}", "ERROR")
-            return {"status": "ERROR", "isUploaded": False, "error": str(e), "timestamp": datetime.now()}
+            return {"status": "ERROR", "isUploaded": False, "error": str(e), "timestamp": datetime.now().isoformat()}
     
     def check_surveys_batch(self, surveys: List[Dict], urls: Dict[str, str], pdf_sizes: Dict[str, int]) -> Dict[str, Dict]:
         results = {}
