@@ -7,7 +7,7 @@ import requests
 from io import StringIO
 from datetime import datetime
 from typing import List, Dict, Any, Optional
-from cultureindex_client import CultureIndexClient, CultureIndexAuthError
+from cultureindex_client_1 import CultureIndexClient, CultureIndexAuthError
 
 try:
     import phonenumbers
@@ -177,33 +177,23 @@ def fetch_all_surveys():
     client_id = "A89F5B0000"
     
     if not email or not password:
-        print("ERROR: Set CULTUREINDEX_EMAIL and CULTUREINDEX_PASSWORD environment variables")
         return 1
     
     client = CultureIndexClient()
     
     try:
-        print("Step 1: Logging in...")
         client.login(email=email, password=password)
-        print("✓ Login successful")
-        
-        print("\nStep 2: Fetching all surveys...")
         all_surveys = client.get_all_surveys(client_id=client_id)
-        print(f"✓ Fetched {len(all_surveys)} surveys")
-        
-        print("\nStep 3: Fetching survey URLs from CSV export...")
         csv_data = client.export_surveys_csv(client_id=client_id)
         survey_urls = get_survey_urls_from_csv(csv_data)
-        print(f"✓ Extracted {len(survey_urls)} survey URLs")
         
-        print("\nStep 4: Checking PDF file sizes...")
         session = requests.Session()
         session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         })
         
         filtered_surveys = []
-        for idx, survey in enumerate(all_surveys, 1):
+        for survey in all_surveys:
             survey_id = str(survey.get('surveyId', ''))
             survey_url = survey_urls.get(survey_id)
             
@@ -212,42 +202,16 @@ def fetch_all_surveys():
                 pdf_size_info = get_pdf_size(survey_url, session)
             
             filtered_surveys.append(extract_survey_info(survey, survey_url, pdf_size_info))
-            
-            if idx % 100 == 0:
-                print(f"  Processed {idx}/{len(all_surveys)} surveys...")
-        
-        print(f"✓ Processed all {len(filtered_surveys)} surveys")
         
         output_file = "culture_index_surveys.json"
-        print(f"\nStep 5: Saving to {output_file}...")
         with open(output_file, 'w', encoding='utf-8') as f:
             json.dump(filtered_surveys, f, indent=2, ensure_ascii=False)
         
-        print(f"✓ Saved to {output_file}")
-        
-        surveys_with_urls = sum(1 for s in filtered_surveys if s.get('surveyReportUrl'))
-        surveys_with_sizes = sum(1 for s in filtered_surveys if s.get('pdfSize'))
-        
-        print(f"\n{'='*60}")
-        print("SUMMARY")
-        print(f"{'='*60}")
-        print(f"Total surveys: {len(filtered_surveys)}")
-        print(f"Surveys with URLs: {surveys_with_urls}")
-        print(f"Surveys with PDF sizes: {surveys_with_sizes}")
-        
-        trait_patterns = set(s.get('traitPattern') for s in filtered_surveys if s.get('traitPattern'))
-        if trait_patterns:
-            print(f"Trait patterns: {', '.join(sorted(trait_patterns)[:10])}...")
-        
         return 0
         
-    except CultureIndexAuthError as e:
-        print(f"Authentication error: {e}")
+    except CultureIndexAuthError:
         return 1
-    except Exception as e:
-        print(f"Error: {e}")
-        import traceback
-        traceback.print_exc()
+    except Exception:
         return 1
 
 if __name__ == "__main__":
