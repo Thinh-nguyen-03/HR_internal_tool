@@ -28,7 +28,7 @@ load_dotenv()
 
 ITEMS_PER_PAGE = int(os.getenv('ITEMS_PER_PAGE', '15'))
 MAX_BATCH_UPLOAD = int(os.getenv('MAX_BATCH_UPLOAD', '15'))
-MAX_BACKGROUND_CHECK = int(os.getenv('MAX_BACKGROUND_CHECK', '250'))
+MAX_BACKGROUND_CHECK = int(os.getenv('MAX_BACKGROUND_CHECK', '50'))
 RECENT_SURVEY_THRESHOLD = int(os.getenv('RECENT_SURVEY_THRESHOLD', '1000'))
 CLIENT_ID = os.getenv('CLIENT_ID', 'A89F5B0000')
 JAZZHR_CACHE_HOURS = int(os.getenv('JAZZHR_CACHE_HOURS', '2'))
@@ -1622,17 +1622,21 @@ def handle_refresh_single(n_clicks_list, button_ids, current_trigger, surveys_da
                         
                         jazzhr_service.check_surveys_batch([survey], {survey_id: pdf_url}, pdf_sizes)
                         log(f"Completed individual check for survey {survey_id}", "WARN")
+                        
+                        # Signal background check completion to trigger UI refresh
+                        global _background_check_needs_signal
+                        _background_check_needs_signal = True
                     except Exception as e:
                         log(f"Error checking survey {survey_id}: {e}", "ERROR")
                 
                 Thread(target=check_single, daemon=True).start()
                 
-                # Trigger UI refresh to show "Checking..." state
+                # Show status message - UI will auto-update when background check completes
                 full_name = f"{first_name} {last_name}".strip() or f"survey {survey_id}"
-                return current_trigger + 1, f"Refreshing status for {full_name}..."
+                return dash.no_update, f"Checking {full_name}..."
             else:
                 log(f"Survey {survey_id} not found in current page data", "WARN")
-                return current_trigger + 1, f"Refreshing status for survey {survey_id}..."
+                return dash.no_update, f"Checking survey {survey_id}..."
     except Exception as e:
         log(f"Error in individual refresh: {e}", "ERROR")
     
