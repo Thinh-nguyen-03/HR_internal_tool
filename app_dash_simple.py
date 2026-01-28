@@ -1574,22 +1574,29 @@ def monitor_background_check(n_intervals, current_signal):
     prevent_initial_call=False
 )
 def check_for_new_surveys(n_intervals):
-    cache_mgr = get_cache_manager()
-    
     try:
-        if hasattr(jazzhr_cache.cache, '_redis') and jazzhr_cache.cache._redis:
-            import json
-            redis_client = jazzhr_cache.cache._redis
-            data = redis_client.get("new_surveys_notification")
-            
-            if data:
-                notification = json.loads(data)
-                if not notification.get("acknowledged", False):
-                    return notification
+        cache_mgr = get_cache_manager()
+        
+        try:
+            if hasattr(jazzhr_cache.cache, '_redis') and jazzhr_cache.cache._redis:
+                import json
+                redis_client = jazzhr_cache.cache._redis
+                data = redis_client.get("new_surveys_notification")
+                
+                if data:
+                    notification = json.loads(data)
+                    if not notification.get("acknowledged", False):
+                        return notification
+        except Exception as e:
+            log(f"Error checking Redis notification: {e}", "ERROR")
+        
+        notification = cache_mgr.get_notification()
+        if notification is None:
+            return {"count": 0}
+        return notification
     except Exception as e:
-        log(f"Error checking Redis notification: {e}", "ERROR")
-    
-    return cache_mgr.get_notification()
+        log(f"Fatal error in check_for_new_surveys: {e}", "ERROR")
+        return {"count": 0}
 
 
 @callback(
@@ -1599,27 +1606,38 @@ def check_for_new_surveys(n_intervals):
     prevent_initial_call=False
 )
 def show_notification_banner(notification):
-    count = notification.get("count", 0) if notification else 0
-    
-    if count > 0:
-        timestamp_str = notification.get("timestamp", "")
-        try:
-            if timestamp_str:
-                dt = datetime.fromisoformat(timestamp_str)
-                time_str = dt.strftime("%I:%M %p")
-            else:
-                time_str = "recently"
-        except:
-            time_str = "recently"
+    try:
+        if not notification or not isinstance(notification, dict):
+            notification = {"count": 0}
         
-        plural = "s" if count != 1 else ""
-        content = [
-            html.Span("New Surveys: ", className="badge-label"),
-            html.Span(str(count), className="badge-count pulse"),
-            html.Span(f" ({time_str})", className="badge-time")
-        ]
-        return content, "surveys-badge has-new-surveys"
-    else:
+        count = notification.get("count", 0)
+        
+        if count > 0:
+            timestamp_str = notification.get("timestamp", "")
+            try:
+                if timestamp_str:
+                    dt = datetime.fromisoformat(timestamp_str)
+                    time_str = dt.strftime("%I:%M %p")
+                else:
+                    time_str = "recently"
+            except:
+                time_str = "recently"
+            
+            plural = "s" if count != 1 else ""
+            content = [
+                html.Span("New Surveys: ", className="badge-label"),
+                html.Span(str(count), className="badge-count pulse"),
+                html.Span(f" ({time_str})", className="badge-time")
+            ]
+            return content, "surveys-badge has-new-surveys"
+        else:
+            content = [
+                html.Span("New Surveys: ", className="badge-label"),
+                html.Span("0", className="badge-count")
+            ]
+            return content, "surveys-badge no-new-surveys"
+    except Exception as e:
+        log(f"Error in show_notification_banner: {e}", "ERROR")
         content = [
             html.Span("New Surveys: ", className="badge-label"),
             html.Span("0", className="badge-count")
