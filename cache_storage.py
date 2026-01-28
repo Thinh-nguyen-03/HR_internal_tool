@@ -8,7 +8,6 @@ from urllib.parse import urlparse, urlunparse
 
 CACHE_ENTRY_VERSION = 1
 
-
 def validate_cache_entry(entry: Dict) -> bool:
     """Validate cache entry structure and version."""
     if not isinstance(entry, dict):
