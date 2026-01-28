@@ -55,7 +55,8 @@ body {
 .header-left {
     display: flex;
     align-items: center;
-    flex: 0 0 auto;
+    justify-content: flex-start;
+    gap: 20px;
 }
 
 .header-logo {
@@ -67,7 +68,6 @@ body {
     display: flex;
     align-items: center;
     justify-content: center;
-    flex: 1;
 }
 
 .header-title {
@@ -82,7 +82,14 @@ body {
     display: flex;
     align-items: center;
     justify-content: flex-end;
-    flex: 0 0 auto;
+    gap: 8px;
+}
+
+.header-separator {
+    width: 1px;
+    height: 24px;
+    background: rgba(255, 255, 255, 0.15);
+    margin: 0 6px;
 }
 
 /* Refresh Button */
@@ -970,4 +977,99 @@ body {
     align-items: center;
     flex-wrap: wrap;
     gap: 12px;
+}
+
+/* Surveys Badge in Header */
+.surveys-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 14px;
+    border-radius: var(--radius-md);
+    font-size: 0.85rem;
+    font-weight: 500;
+    transition: all 0.3s ease;
+    user-select: none;
+}
+
+/* No new surveys - subtle */
+.surveys-badge.no-new-surveys {
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    cursor: default;
+}
+
+.surveys-badge.no-new-surveys .badge-label {
+    color: var(--text-tertiary);
+    font-weight: 600;
+}
+
+.surveys-badge.no-new-surveys .badge-count {
+    color: var(--text-secondary);
+    font-weight: 600;
+    background: rgba(255, 255, 255, 0.08);
+    padding: 2px 8px;
+    border-radius: var(--radius-sm);
+}
+
+/* Has new surveys - attention-grabbing */
+.surveys-badge.has-new-surveys {
+    background: linear-gradient(135deg, rgba(249, 168, 37, 0.15) 0%, rgba(249, 168, 37, 0.08) 100%);
+    border: 1px solid var(--brand-yellow);
+    cursor: pointer;
+    box-shadow: 0 0 0 0 rgba(249, 168, 37, 0.4);
+    animation: badgePulse 2s ease-in-out infinite;
+}
+
+.surveys-badge.has-new-surveys:hover {
+    background: linear-gradient(135deg, rgba(249, 168, 37, 0.25) 0%, rgba(249, 168, 37, 0.15) 100%);
+    border-color: var(--brand-yellow-hover);
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(249, 168, 37, 0.3);
+}
+
+.surveys-badge.has-new-surveys:active {
+    transform: translateY(0);
+}
+
+.surveys-badge.has-new-surveys .badge-label {
+    color: var(--text-secondary);
+    font-weight: 600;
+}
+
+.surveys-badge.has-new-surveys .badge-count {
+    color: var(--brand-yellow);
+    font-weight: 700;
+    background: rgba(249, 168, 37, 0.2);
+    padding: 3px 10px;
+    border-radius: var(--radius-sm);
+    font-size: 0.9rem;
+}
+
+.surveys-badge.has-new-surveys .badge-count.pulse {
+    animation: countPulse 1.5s ease-in-out infinite;
+}
+
+.surveys-badge.has-new-surveys .badge-time {
+    color: var(--text-tertiary);
+    font-size: 0.75rem;
+    font-weight: 600;
+}
+
+@keyframes badgePulse {
+    0%, 100% {
+        box-shadow: 0 0 0 0 rgba(249, 168, 37, 0.4);
+    }
+    50% {
+        box-shadow: 0 0 0 4px rgba(249, 168, 37, 0);
+    }
+}
+
+@keyframes countPulse {
+    0%, 100% {
+        transform: scale(1);
+    }
+    50% {
+        transform: scale(1.1);
+    }
 }
