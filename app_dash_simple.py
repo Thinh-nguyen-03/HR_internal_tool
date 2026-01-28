@@ -1560,12 +1560,18 @@ def handle_refresh_single(n_clicks_list, button_ids, current_trigger, surveys_da
     prevent_initial_call=True
 )
 def monitor_background_check(n_intervals, current_signal):
-    cache_mgr = get_cache_manager()
-    
-    if cache_mgr.check_ui_signal():
-        return current_signal + 1
-    
-    return dash.no_update
+    try:
+        cache_mgr = get_cache_manager()
+        
+        if cache_mgr.check_ui_signal():
+            if current_signal is None:
+                current_signal = 0
+            return current_signal + 1
+        
+        return dash.no_update
+    except Exception as e:
+        log(f"Error in monitor_background_check: {e}", "ERROR")
+        return dash.no_update
 
 
 @callback(
