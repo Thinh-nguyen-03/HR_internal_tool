@@ -260,6 +260,14 @@ class JazzHRUploadChecker:
         last_name: str = "", 
         verbose: bool = False
     ) -> Optional[Dict]:
+        """
+        Match Culture Index PDF with JazzHR files using strict criteria.
+        
+        Matching Strategy (from most to least reliable):
+        1. Exact filename match + size verification
+        2. Full name pattern + size verification (REQUIRED)
+        3. Size-only match (as fallback when filename unavailable)
+        """
         start_time = time.time()
         
         if not survey_pdf_url:
@@ -314,32 +322,16 @@ class JazzHRUploadChecker:
                     name_match = True
                     match_type = 'uploaded_filename_pattern'
             
-            if not name_match and first_name and last_name:
-                has_name_indicator = False
-                
+            # Strict full name matching (stronger than initials to avoid false positives)
+            if not name_match and first_name and last_name and full_name_clean:
+                # Check for full name in filename
                 if full_name_clean in jazz_lower:
-                    has_name_indicator = True
-                elif first_initial and last_initial:
-                    jazz_normalized = jazz_lower.replace('_', '').replace(' ', '').replace('-', '')
-                    if f"{first_initial}{last_initial}" in jazz_normalized:
-                        has_name_indicator = True
-                elif ci_basename:
-                    ci_clean = ci_basename.replace('_', ' ').lower()
-                    if ci_clean in jazz_lower:
-                        has_name_indicator = True
-                
-                has_ci_indicator = (
-                    ('culture' in jazz_lower and 'index' in jazz_lower) or
-                    'cultureindex' in jazz_lower or
-                    '_ci.' in jazz_lower or
-                    ' ci.' in jazz_lower or
-                    '_ci_' in jazz_lower or
-                    ' ci ' in jazz_lower
-                )
-                
-                if has_name_indicator and has_ci_indicator:
                     name_match = True
-                    match_type = 'name_and_ci_keyword'
+                    match_type = 'full_name'
+                # Check for "FirstName_LastName" pattern
+                elif f"{first_name.lower()}_{last_name.lower()}" in jazz_lower.replace(' ', '_'):
+                    name_match = True
+                    match_type = 'name_pattern'
             
             size_match = False
             if survey_pdf_size and jazz_size:
@@ -348,7 +340,22 @@ class JazzHRUploadChecker:
                 if jazz_size == survey_pdf_size or size_diff <= size_tolerance:
                     size_match = True
             
-            if (name_match and size_match) or (size_match and survey_pdf_size) or (name_match and not survey_pdf_size):
+            # STRICT MATCHING: Require BOTH name AND size match for confirmation
+            # Only exception: exact filename match (most reliable indicator)
+            is_match = False
+            if match_type == 'exact_filename' and name_match:
+                # Exact filename match is highly reliable, size is optional but recommended
+                if size_match or not survey_pdf_size:
+                    is_match = True
+            elif match_type in ['uploaded_filename_pattern', 'full_name', 'name_pattern']:
+                # For other name matches, REQUIRE size verification to avoid false positives
+                if size_match and survey_pdf_size:
+                    is_match = True
+            elif size_match and survey_pdf_size:
+                # Size-only match acceptable if very close (within tolerance)
+                is_match = True
+            
+            if is_match:
                 elapsed = time.time() - start_time
                 self.file_check_times.append(elapsed)
                 
@@ -751,6 +758,9 @@ Note: Survey numbers use 1-based indexing (survey 1 is the first survey)
     if 'error' in stats:
         return 1
     
+    print("\n" + "="*60)
+    print("SUMMARY")
+    print("="*60)
     print(f"Total surveys in file: {stats['total']}")
     if 'range_start' in stats:
         print(f"Range checked: surveys {stats['range_start']}-{stats['range_end']} ({stats['checked_in_range']} surveys)")
@@ -763,7 +773,9 @@ Note: Survey numbers use 1-based indexing (survey 1 is the first survey)
     
     if 'performance' in stats:
         perf = stats['performance']
+        print("\n" + "="*60)
         print("PERFORMANCE METRICS")
+        print("="*60)
         print(f"Total execution time: {perf['total_time']:.2f}s ({perf['total_time']/60:.1f} minutes)")
         print(f"  - Load time: {perf['load_time']:.2f}s")
         print(f"  - Processing time: {perf['processing_time']:.2f}s ({perf['processing_time']/60:.1f} minutes)")
@@ -778,7 +790,9 @@ Note: Survey numbers use 1-based indexing (survey 1 is the first survey)
         print(f"  - Average file check time: {perf['avg_file_check_time']:.3f}s")
         print(f"  - Average per survey: {perf['avg_per_survey']:.3f}s")
         
+        print("\n" + "="*60)
         print("BOTTLENECK ANALYSIS")
+        print("="*60)
         if perf['max_api_call_time'] > 5.0:
             print(f"WARNING: Slowest API call took {perf['max_api_call_time']:.2f}s")
         if perf['avg_api_call_time'] > 1.0:
@@ -795,3 +809,4 @@ Note: Survey numbers use 1-based indexing (survey 1 is the first survey)
 
 if __name__ == "__main__":
     sys.exit(main())
+
