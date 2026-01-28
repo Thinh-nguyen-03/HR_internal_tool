@@ -1,0 +1,38 @@
+services:
+  - type: web
+    name: culture-index-hr-tool
+    runtime: python
+    region: oregon
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:server --bind 0.0.0.0:$PORT --workers 2 --timeout 120
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11"
+      - key: BACKGROUND_JOB_SECRET
+        generateValue: true
+      - key: CACHE_BACKEND
+        value: redis
+
+  - type: cron
+    name: survey-sync-hourly
+    runtime: docker
+    region: oregon
+    schedule: "0 * * * *"
+    dockerCommand: |
+      curl -X POST \
+        -H "Authorization: Bearer $BACKGROUND_JOB_SECRET" \
+        -H "Content-Type: application/json" \
+        --max-time 120 \
+        --retry 3 \
+        --retry-delay 10 \
+        $APP_URL/api/background-refresh
+    envVars:
+      - key: APP_URL
+        sync: false
+      - key: BACKGROUND_JOB_SECRET
+        fromService:
+          name: culture-index-hr-tool
+          type: web
+          envVarKey: BACKGROUND_JOB_SECRET
+
