@@ -1079,8 +1079,7 @@ def build_survey_display(surveys: List[Dict], jazzhr_results: Dict, pdf_sizes: D
             html.Div([
                 html.Span(
                     format_time_ago(jazzhr.get('timestamp')) if jazzhr.get('timestamp') else "Never checked",
-                    className="last-checked-value",
-                    title=f"Last checked: {jazzhr.get('timestamp').strftime('%Y-%m-%d %I:%M %p') if jazzhr.get('timestamp') else 'Never'}"
+                    className="last-checked-value"
                 ),
                 html.Button(
                     "Refresh Status",
