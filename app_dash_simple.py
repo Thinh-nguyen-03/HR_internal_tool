@@ -1546,6 +1546,10 @@ def handle_refresh_jazzhr(n_clicks, current_page, search_query, current_trigger)
     log("Triggering UI refresh to re-check surveys", "WARN")
     return current_trigger + 1, "Refreshing JazzHR status..."
 
+# Track last refresh time for each survey to prevent duplicate triggers
+_last_individual_refresh = {}
+_individual_refresh_lock = RLock()
+
 @callback(
     [Output("refresh-trigger", "data", allow_duplicate=True),
      Output("upload-status", "children", allow_duplicate=True)],
@@ -1560,7 +1564,13 @@ def handle_refresh_single(n_clicks_list, button_ids, current_trigger):
         return dash.no_update, dash.no_update
     
     triggered_prop = ctx.triggered[0]['prop_id']
+    triggered_value = ctx.triggered[0].get('value')
+    
     if '.n_clicks' not in triggered_prop:
+        return dash.no_update, dash.no_update
+    
+    # Check that this is an actual button click (triggered value must be a positive number)
+    if triggered_value is None or triggered_value == 0:
         return dash.no_update, dash.no_update
     
     import json
@@ -1570,7 +1580,17 @@ def handle_refresh_single(n_clicks_list, button_ids, current_trigger):
         survey_id = button_id.get('index')
         
         if survey_id:
-            log(f"Individual refresh for survey {survey_id}", "WARN")
+            # Debounce: prevent duplicate triggers within 2 seconds
+            import time
+            current_time = time.time()
+            with _individual_refresh_lock:
+                last_refresh_time = _last_individual_refresh.get(survey_id, 0)
+                if current_time - last_refresh_time < 2.0:
+                    log(f"Individual refresh for survey {survey_id} ignored (debounced, last refresh {current_time - last_refresh_time:.1f}s ago)", "WARN")
+                    return dash.no_update, dash.no_update
+                _last_individual_refresh[survey_id] = current_time
+            
+            log(f"Individual refresh for survey {survey_id} (n_clicks={triggered_value})", "WARN")
             
             if jazzhr_cache.get(survey_id):
                 jazzhr_cache.delete(survey_id)
