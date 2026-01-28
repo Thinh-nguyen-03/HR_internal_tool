@@ -11,7 +11,7 @@ import requests
 from dash import Dash, html, dcc, Input, Output, State, callback, ctx, ALL
 import dash
 from dotenv import load_dotenv
-from flask import redirect, request, session
+from flask import redirect, request, session, jsonify
 from flask_login import current_user, logout_user
 from flask_wtf.csrf import CSRFProtect
 
@@ -23,6 +23,14 @@ from auth import AuthManager
 from login_layout import create_login_layout
 from security_utils import is_safe_url, validate_url_or_raise
 from input_validation import sanitize_search_query, validate_survey_id, validate_page_number
+
+# New modular imports for cleaner architecture
+from app_cache import get_cache_manager, CacheManager
+from background_sync import create_background_sync_blueprint
+from survey_display import (
+    build_loading_result, build_error_result, 
+    build_empty_result, build_notification_banner
+)
 
 load_dotenv()
 
@@ -43,7 +51,6 @@ PDF_FETCH_TIMEOUT = int(os.getenv('PDF_FETCH_TIMEOUT', '5'))
 
 
 def log(message: str, level: str = "INFO") -> None:
-    """Log critical events (ERROR, WARN, PERF only) to console and file."""
     if level not in ["ERROR", "WARN", "PERF"]:
         return
     
@@ -58,10 +65,6 @@ def log(message: str, level: str = "INFO") -> None:
 
 
 def get_user_friendly_error(error: Exception, context: str = "operation") -> str:
-    """
-    Convert exception to user-friendly message (logs detailed error server-side).
-    Prevents information disclosure while maintaining debuggability.
-    """
     import traceback
     
     detailed_error = f"{context} failed: {str(error)}\n{traceback.format_exc()}"
@@ -85,10 +88,6 @@ def parse_csv_date(date_str: Optional[str]) -> Optional[str]:
 
 
 class SimpleSurveyService:
-    """
-    Manages Culture Index survey data with caching.
-    Thread-safe with lazy loading and background refresh.
-    """
     def __init__(self, client_id: str, items_per_page: int = 20):
         self.client_id = client_id
         self.items_per_page = items_per_page
@@ -192,12 +191,11 @@ class SimpleSurveyService:
                 except CultureIndexAuthError as auth_error:
                     if "Token expired or invalid" in str(auth_error) and attempt < max_retries - 1:
                         log("Token expired, re-authenticating...", "WARN")
-                        # Clear the client to force re-authentication
                         self._client = None
                         client = self._get_client()
                         log("Re-authentication successful, retrying request...", "WARN")
                     else:
-                        raise  # Re-raise if not token expiry or last attempt
+                        raise
             
             log(f"CSV download completed in {time.time()-csv_start:.1f}s, size: {len(csv_data)} bytes", "WARN")
             
@@ -361,7 +359,6 @@ class SimpleJazzHRService:
                     "timestamp": datetime.now().isoformat()
                 }
             
-            # Track status changes to detect false positives/negatives
             if cached:
                 old_status = cached.get('status')
                 new_status = result['status']
@@ -622,9 +619,9 @@ class BackgroundJazzHRChecker:
                     api_calls += len(first_page_need_check) * 2
                     log(f"JazzHR Checker: First page checks complete", "WARN")
                 
-                # Mark initial checks as complete
-                global _jazzhr_check_complete
-                _jazzhr_check_complete = True
+                # Mark initial checks as complete - using cache manager
+                cache_mgr = get_cache_manager()
+                cache_mgr.app_state.set_jazzhr_check_complete(True)
                 log(f"JazzHR Checker: Initial checks complete, UI can now cache results", "WARN")
                 
                 remaining_surveys = all_surveys[first_page_count:MAX_BACKGROUND_CHECK]
@@ -674,13 +671,10 @@ class BackgroundJazzHRChecker:
                     pdf_stats = pdf_size_cache.get_stats()
                     log(f"PDF Cache: {pdf_stats['hits']} hits, {pdf_stats['misses']} misses, {pdf_stats['hit_rate_percent']}% hit rate", "PERF")
                 
-                # Signal UI to refresh with new JazzHR status
-                global _cache_version, _last_render_result, _background_check_needs_signal
-                with _render_cache_lock:
-                    _cache_version += 1
-                    _last_render_result = None
-                    _background_check_needs_signal = True
-                log(f"JazzHR Checker: Completed, signaling UI update (version {_cache_version})", "WARN")
+                # Signal UI to refresh with new JazzHR status - using cache manager
+                cache_mgr = get_cache_manager()
+                cache_mgr.on_jazzhr_check_complete()
+                log(f"JazzHR Checker: Completed, signaling UI update", "WARN")
                 
                 # Success - exit retry loop
                 break
@@ -721,6 +715,17 @@ server = app.server
 csrf = CSRFProtect(server)
 log("CSRF protection enabled", "WARN")
 
+# Register background sync blueprint (for automated hourly data refresh)
+background_sync_bp = create_background_sync_blueprint(
+    survey_service=survey_service,
+    jazzhr_cache=jazzhr_cache,
+    background_checker=background_checker,
+    recent_threshold=RECENT_SURVEY_THRESHOLD
+)
+server.register_blueprint(background_sync_bp)
+csrf.exempt(background_sync_bp)  # Exempt API endpoints from CSRF
+log("Background sync API endpoints registered", "WARN")
+
 # Get Redis client for rate limiting (if using Redis cache)
 redis_client = None
 if hasattr(jazzhr_cache_backend, '_redis') and jazzhr_cache_backend._redis:
@@ -735,16 +740,11 @@ if not os.path.exists("assets"):
     os.makedirs("assets")
 
 @server.route('/health')
-@csrf.exempt  # Exempt public health endpoint from CSRF
+@csrf.exempt
 def health_check():
-    """
-    Basic health check endpoint (public, minimal information).
-    For load balancers and monitoring tools.
-    """
     from flask import jsonify
     
     try:
-        # Basic checks only
         redis_healthy = jazzhr_cache.ping()
         surveys_loaded = survey_service.is_loaded()
         
@@ -770,14 +770,9 @@ def health_check():
 
 @server.route('/health/detailed')
 def health_check_detailed():
-    """
-    Detailed health check endpoint (requires authentication).
-    Exposes internal system information for debugging.
-    """
     from flask import jsonify
     from auth import require_auth
     
-    # Require authentication for detailed info
     if not current_user.is_authenticated:
         return jsonify({"error": "Authentication required"}), 401
     
@@ -826,7 +821,7 @@ def health_check_detailed():
         }), 500
 
 @server.route('/health/ready')
-@csrf.exempt  # Exempt public health endpoint from CSRF
+@csrf.exempt
 def readiness_check():
     from flask import jsonify
     
@@ -839,10 +834,23 @@ def readiness_check():
     return jsonify({"ready": True})
 
 @server.route('/health/live')
-@csrf.exempt  # Exempt public health endpoint from CSRF
+@csrf.exempt
 def liveness_check():
     from flask import jsonify
     return jsonify({"alive": True, "timestamp": datetime.now().isoformat()})
+
+@server.route('/api/test-notification', methods=['POST'])
+@csrf.exempt
+def test_notification():
+    """Test endpoint to trigger a fake notification for development/testing."""
+    count = request.args.get('count', 3, type=int)
+    cache_mgr = get_cache_manager()
+    cache_mgr.app_state.set_new_surveys_notification(
+        count=count,
+        survey_ids=[f"TEST{i:03d}" for i in range(count)]
+    )
+    log(f"Test notification created with {count} fake surveys", "WARN")
+    return jsonify({"status": "notification created", "count": count}), 200
 
 @server.route('/login', methods=['GET', 'POST'])
 def login():
@@ -867,15 +875,14 @@ def login():
 
 @server.route('/logout')
 def logout():
+    cache_mgr = get_cache_manager()
+    cache_mgr.on_logout()
+    
     auth_manager.logout()
     return redirect('/login')
 
 @server.before_request
 def handle_csrf_for_dash():
-    """
-    Exempt Dash callback endpoints from CSRF validation.
-    Dash has its own callback validation mechanism.
-    """
     dash_endpoints = ['/_dash-update-component', '/_dash-layout', '/_dash-dependencies', '/_reload-hash']
     if any(request.path.startswith(ep) for ep in dash_endpoints):
         csrf._exempt_views.add('dash.dash.dispatch')
@@ -883,8 +890,15 @@ def handle_csrf_for_dash():
 
 @server.before_request
 def require_login():
-    # Public routes that don't require authentication
-    allowed_routes = ['/login', '/logout', '/health', '/health/ready', '/health/live', '/_dash-layout', '/_dash-dependencies', '/_dash-update-component', '/_reload-hash']
+    allowed_routes = [
+        '/login', '/logout', 
+        '/health', '/health/ready', '/health/live',
+        '/api/background-refresh',
+        '/api/get-notification',
+        '/api/acknowledge-notification',
+        '/api/test-notification',
+        '/_dash-layout', '/_dash-dependencies', '/_dash-update-component', '/_reload-hash'
+    ]
     
     if request.path.startswith('/assets/') or request.path.startswith('/_dash-component-suites/'):
         return None
@@ -905,12 +919,21 @@ def serve_layout():
             html.Div([
                 html.Div([
                     html.Img(src="/assets/SENERGY-Logo_Icon-Yellow.png", className="header-logo"),
+                    html.Div(
+                        id="new-surveys-banner",
+                        children=[
+                            html.Span("New Surveys: ", className="badge-label"),
+                            html.Span("0", className="badge-count")
+                        ],
+                        className="surveys-badge no-new-surveys",
+                        n_clicks=0
+                    ),
                 ], className="header-left"),
                 html.Div([
                     html.Button("Upload Selected", id="upload-btn", className="upload-btn", n_clicks=0, disabled=True),
                     html.Button("Refresh JazzHR", id="refresh-jazzhr-btn", className="refresh-btn", n_clicks=0),
-                    html.Button("Refresh CI", id="refresh-btn", className="refresh-btn", n_clicks=0),
-                    html.A("Logout", href="/logout", className="refresh-btn", style={"marginLeft": "12px", "textDecoration": "none", "display": "flex", "alignItems": "center"}),
+                    html.Div(className="header-separator"),
+                    html.A("Logout", href="/logout", className="refresh-btn", style={"textDecoration": "none", "display": "flex", "alignItems": "center"}),
                 ], className="header-right"),
             ], className="header"),
         
@@ -969,9 +992,12 @@ def serve_layout():
     dcc.Store(id="upload-results", data={}),
     dcc.Store(id="refresh-trigger", data=0),
     dcc.Store(id="background-check-signal", data=0),
+    dcc.Store(id="notification-data", data={"count": 0}),
     
     dcc.Interval(id="upload-interval", interval=UPLOAD_INTERVAL_MS, n_intervals=0, disabled=True),
     dcc.Interval(id="background-signal-interval", interval=1000, n_intervals=0),
+    # Smart polling: Dash Interval auto-pauses when tab is inactive (browser optimization)
+    dcc.Interval(id="notification-check-interval", interval=10000, n_intervals=0),
     ])
 
 app.layout = serve_layout
@@ -1004,7 +1030,7 @@ def format_time_ago(timestamp_str: str) -> str:
         return "Unknown"
 
 
-def build_survey_display(surveys: List[Dict], jazzhr_results: Dict, pdf_sizes: Dict) -> Tuple[List, List, List]:
+def build_survey_display_local(surveys: List[Dict], jazzhr_results: Dict, pdf_sizes: Dict) -> Tuple[List, List, List]:
     survey_items = []
     uploadable_ids = []
     surveys_data = []
@@ -1110,16 +1136,6 @@ def build_survey_display(surveys: List[Dict], jazzhr_results: Dict, pdf_sizes: D
     
     return survey_items, uploadable_ids, surveys_data
 
-_callback_lock = Lock()
-_last_render_result = None
-_last_search_query = ""
-_last_search_page = 1
-_last_result_cache_version = -1
-_render_cache_lock = Lock()
-_cache_version = 0
-_jazzhr_check_complete = False
-_background_check_needs_signal = False
-_last_displayed_surveys = []
 _active_uploads = set()
 _active_uploads_lock = Lock()
 _completed_uploads = {}
@@ -1141,15 +1157,14 @@ _completed_uploads = {}
     prevent_initial_call=False
 )
 def display_surveys(page, search_query, refresh_trigger, background_signal):
-    global _last_render_result, _last_search_query, _last_search_page, _cache_version, _last_result_cache_version, _last_displayed_surveys
+    cache_mgr = get_cache_manager()
     
-    # Validate and sanitize page number
+    # Validate and sanitize inputs
     is_valid, page, error_msg = validate_page_number(page)
     if not is_valid:
         log(f"Invalid page number: {error_msg}", "WARN")
         page = 1
     
-    # Sanitize search query
     if search_query:
         search_query = sanitize_search_query(search_query, max_length=100)
     
@@ -1158,30 +1173,17 @@ def display_surveys(page, search_query, refresh_trigger, background_signal):
     except (AttributeError, RuntimeError):
         triggered_id = None
     
-    # Cache result only if data is fully loaded and initial JazzHR checks complete
-    # Don't cache incomplete data to prevent showing stale "Checking..." statuses
-    with _render_cache_lock:
-        current_cache_key = (search_query or "", page, _cache_version)
-        cached_key = (_last_search_query, _last_search_page, _last_result_cache_version)
-        
-        # Only use cache if JazzHR initial checks are complete
-        if (triggered_id != "refresh-trigger" and 
-            survey_service.is_loaded() and 
-            not survey_service.is_loading() and
-            _jazzhr_check_complete and
-            _last_render_result and 
-            current_cache_key == cached_key):
-            return _last_render_result
+    is_refresh_trigger = (triggered_id == "refresh-trigger")
     
-    acquired = _callback_lock.acquire(blocking=False)
-    if not acquired:
-        if _last_render_result:
-            return _last_render_result
-        return (
-            [html.Div("Loading surveys...", className="empty-message")],
-            "Loading...", True, True, "Loading data...",
-            [], [], {"display": "block"}, dash.no_update
-        )
+    # Check cache (session-based, respects JazzHR check completion)
+    if survey_service.is_loaded() and not survey_service.is_loading():
+        cached = cache_mgr.get_cached_result(search_query, page, is_refresh_trigger)
+        if cached:
+            return cached
+    
+    # Try to acquire callback lock (non-blocking)
+    if not cache_mgr.callback_lock.try_acquire("display_surveys"):
+        return build_loading_result("Loading surveys...")
     
     try:
         start_time = time.time()
@@ -1191,15 +1193,7 @@ def display_surveys(page, search_query, refresh_trigger, background_signal):
         
         if not survey_service.is_loaded():
             if survey_service.is_loading():
-                result = (
-                    [html.Div("Refreshing surveys from Culture Index...", className="empty-message")],
-                    "Refreshing...", True, True, "Refreshing data...",
-                    [], [], {"display": "block"}, dash.no_update
-                )
-                with _render_cache_lock:
-                    _last_render_result = result
-                    _last_result_cache_version = _cache_version
-                return result
+                return build_loading_result("Refreshing surveys from Culture Index...")
             
             log(f"First request - loading surveys (trigger={triggered_id})", "WARN")
             try:
@@ -1212,37 +1206,12 @@ def display_surveys(page, search_query, refresh_trigger, background_signal):
                     background_checker.start_checking()
             except Exception as e:
                 user_error = get_user_friendly_error(e, "loading surveys")
-                result = (
-                    [html.Div(user_error, className="empty-message")],
-                    "Error", True, True, "Unable to load surveys",
-                    [], [], {"display": "none"}, dash.no_update
-                )
-                with _render_cache_lock:
-                    _last_render_result = result
-                    _last_result_cache_version = _cache_version
-                return result
+                return build_error_result(user_error)
         
         if not survey_service.is_loaded():
             if survey_service.is_loading():
-                result = (
-                    [html.Div("Refreshing surveys from Culture Index...", className="empty-message")],
-                    "Refreshing...", True, True, "Refreshing data...",
-                    [], [], {"display": "block"}, dash.no_update
-                )
-                with _render_cache_lock:
-                    _last_render_result = result
-                    _last_result_cache_version = _cache_version
-                return result
-            
-            result = (
-                [html.Div("Failed to load survey data", className="empty-message")],
-                "Error", True, True, "Load failed",
-                [], [], {"display": "none"}, dash.no_update
-            )
-            with _render_cache_lock:
-                _last_render_result = result
-                _last_result_cache_version = _cache_version
-            return result
+                return build_loading_result("Refreshing surveys from Culture Index...")
+            return build_error_result("Failed to load survey data")
         
         if search_query and len(search_query) >= 2:
             all_results = survey_service.search_surveys(search_query, limit=100)
@@ -1253,39 +1222,17 @@ def display_surveys(page, search_query, refresh_trigger, background_signal):
             surveys, total_count = survey_service.get_page(page)
         
         if not surveys:
-            msg = f"No results for '{search_query}'" if search_query else "No surveys found."
-            result = (
-                [html.Div(msg, className="empty-message")],
-                "0 results", True, True, f"Updated: {datetime.now().strftime('%I:%M:%S %p')}",
-                [], [], {"display": "none"}, "" if triggered_id == "refresh-trigger" else dash.no_update
-            )
-            with _render_cache_lock:
-                _last_render_result = result
-                _last_result_cache_version = _cache_version
+            result = build_empty_result(search_query)
+            cache_mgr.cache_result(search_query, page, result)
             return result
         
         urls = {str(s['surveyId']): s.get('surveyReportUrl') for s in surveys}
         
-        if triggered_id == "refresh-trigger":
-            log(f"Refresh trigger: force-checking {len(surveys)} surveys on current page", "WARN")
+        if is_refresh_trigger:
+            log(f"Refresh trigger: force-checking {len(surveys)} surveys", "WARN")
             urls_to_check = {sid: url for sid, url in urls.items() if url}
-            
-            log(f"Fetching PDF sizes for {len(urls_to_check)} URLs...", "WARN")
-            pdf_fetch_start = time.time()
             pdf_sizes = fetch_pdf_sizes(urls_to_check, pdf_size_cache)
-            log(f"PDF sizes fetched in {time.time()-pdf_fetch_start:.1f}s", "WARN")
-            
-            log(f"Checking JazzHR status for {len(surveys)} surveys...", "WARN")
-            jazzhr_check_start = time.time()
             jazzhr_results = jazzhr_service.check_surveys_batch(surveys, urls, pdf_sizes)
-            log(f"JazzHR checks completed in {time.time()-jazzhr_check_start:.1f}s", "WARN")
-            
-            # Log summary of results
-            status_counts = {}
-            for result in jazzhr_results.values():
-                status = result.get('status', 'UNKNOWN')
-                status_counts[status] = status_counts.get(status, 0) + 1
-            log(f"JazzHR results: {dict(status_counts)}", "WARN")
         else:
             pdf_sizes = {}
             survey_ids = [str(s['surveyId']) for s in surveys]
@@ -1310,29 +1257,24 @@ def display_surveys(page, search_query, refresh_trigger, background_signal):
                         urls_to_check = {sid: url for sid, url in urls_uncached.items() if url}
                         pdf_sizes_uncached = fetch_pdf_sizes(urls_to_check, pdf_size_cache)
                         jazzhr_service.check_surveys_batch(uncached_surveys, urls_uncached, pdf_sizes_uncached)
+                        cache_mgr.app_state.request_ui_signal()
                     except Exception as e:
                         log(f"Error checking uncached surveys: {e}", "ERROR")
                 
                 Thread(target=check_uncached, daemon=True).start()
         
         try:
-            survey_items, uploadable_ids, surveys_data = build_survey_display(surveys, jazzhr_results, pdf_sizes)
+            survey_items, uploadable_ids, surveys_data = build_survey_display_local(surveys, jazzhr_results, pdf_sizes)
         except Exception as e:
             user_error = get_user_friendly_error(e, "loading surveys")
             survey_items = [html.Div(user_error, className="empty-message")]
             uploadable_ids = []
             surveys_data = []
         
-        if not survey_items or len(survey_items) == 0:
-            log(f"WARNING: No survey items generated for page {page}, surveys count: {len(surveys)}, jazzhr_results count: {len(jazzhr_results)}", "WARN")
+        if not survey_items:
             survey_items = [html.Div("No surveys to display", className="empty-message")]
         
-        if not isinstance(survey_items, list):
-            log(f"ERROR: survey_items is not a list: {type(survey_items)}", "ERROR")
-            survey_items = [html.Div("Error: Invalid survey data format", className="empty-message")]
-        
         total_pages = max(1, (total_count + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE)
-        
         if search_query:
             page_info = f"Page {page} of {total_pages} ({total_count} results for '{search_query}')"
         else:
@@ -1342,18 +1284,9 @@ def display_surveys(page, search_query, refresh_trigger, background_signal):
         elapsed_ms = elapsed * 1000
         updated_text = f"Updated: {datetime.now().strftime('%I:%M:%S %p')} ({elapsed_ms:.0f}ms)"
         
-        # Track survey appearance/disappearance
         current_survey_ids = [str(s.get('surveyId')) for s in surveys]
-        if _last_displayed_surveys and _last_displayed_surveys != current_survey_ids:
-            disappeared = set(_last_displayed_surveys) - set(current_survey_ids)
-            appeared = set(current_survey_ids) - set(_last_displayed_surveys)
-            if disappeared:
-                log(f"Surveys DISAPPEARED from display: {list(disappeared)[:5]}", "WARN")
-            if appeared:
-                log(f"Surveys APPEARED in display: {list(appeared)[:5]}", "WARN")
-        _last_displayed_surveys = current_survey_ids
+        cache_mgr.track_displayed_surveys(current_survey_ids)
         
-        # Clear upload status on refresh or background check signal
         upload_status_msg = "" if triggered_id in ["refresh-trigger", "background-check-signal"] else dash.no_update
         
         result = (
@@ -1364,29 +1297,18 @@ def display_surveys(page, search_query, refresh_trigger, background_signal):
             upload_status_msg
         )
         
-        with _render_cache_lock:
-            _last_render_result = result
-            _last_result_cache_version = _cache_version
-            _last_search_query = search_query or ""
-            _last_search_page = page
+        cache_mgr.cache_result(search_query, page, result)
         
         if elapsed_ms > 500:
             log(f"Display callback took {elapsed_ms:.0f}ms", "WARN")
         
         return result
+        
     except Exception as e:
         user_error = get_user_friendly_error(e, "loading surveys")
-        result = (
-            [html.Div(user_error, className="empty-message")],
-            "Error", True, True, "Unable to load surveys",
-            [], [], {"display": "none"}, dash.no_update
-        )
-        with _render_cache_lock:
-            _last_render_result = result
-            _last_result_cache_version = _cache_version
-        return result
+        return build_error_result(user_error)
     finally:
-        _callback_lock.release()
+        cache_mgr.callback_lock.release()
 
 @callback(
     [Output("login-url", "pathname"),
@@ -1461,14 +1383,17 @@ def handle_refresh_ci(n_clicks, current_trigger):
     if not n_clicks:
         return dash.no_update, dash.no_update, dash.no_update, dash.no_update
     
+    cache_mgr = get_cache_manager()
+    
     log("Refresh CI button clicked - starting reload process", "WARN")
     
     survey_service.clear_cache()
     background_checker.stop_checking()
+    
+    cache_mgr.on_data_refresh_start()
     log("Survey cache cleared", "WARN")
     
     def _reload():
-        global _last_render_result, _cache_version
         try:
             log("Background reload thread started", "WARN")
             survey_service.load_surveys(force_refresh=True)
@@ -1480,11 +1405,8 @@ def handle_refresh_ci(n_clicks, current_trigger):
                 jazzhr_cache.set_recent_surveys(recent_ids)
                 log(f"Updated recent surveys cache with {len(recent_ids)} IDs", "WARN")
             
-            # Invalidate UI cache to force refresh with new data
-            with _render_cache_lock:
-                _cache_version += 1
-                _last_render_result = None
-            log(f"Invalidated UI cache (version {_cache_version})", "WARN")
+            cache_mgr.on_data_refresh_complete()
+            log("Cache manager notified of refresh completion", "WARN")
             
             log("Starting background JazzHR checker", "WARN")
             background_checker.start_checking()
@@ -1520,12 +1442,10 @@ def handle_refresh_jazzhr(n_clicks, current_page, search_query, current_trigger)
     
     surveys_to_clear = []
     if search_query and len(search_query) >= 2:
-        # If searching, get 30 results from search
         all_results = survey_service.search_surveys(search_query, limit=100)
         start_idx = (current_page - 1) * ITEMS_PER_PAGE
         surveys_to_clear = all_results[start_idx:start_idx + 30]
     else:
-        # Get 30 surveys starting from current page
         all_surveys = survey_service.get_all_surveys()
         start_idx = (current_page - 1) * ITEMS_PER_PAGE
         surveys_to_clear = all_surveys[start_idx:start_idx + 30]
@@ -1546,7 +1466,6 @@ def handle_refresh_jazzhr(n_clicks, current_page, search_query, current_trigger)
     log("Triggering UI refresh to re-check surveys", "WARN")
     return current_trigger + 1, "Refreshing JazzHR status..."
 
-# Track last refresh time for each survey to prevent duplicate triggers
 _last_individual_refresh = {}
 _individual_refresh_lock = RLock()
 
@@ -1570,7 +1489,6 @@ def handle_refresh_single(n_clicks_list, button_ids, current_trigger, surveys_da
     if '.n_clicks' not in triggered_prop:
         return dash.no_update, dash.no_update
     
-    # Check that this is an actual button click (triggered value must be a positive number)
     if triggered_value is None or triggered_value == 0:
         return dash.no_update, dash.no_update
     
@@ -1581,7 +1499,6 @@ def handle_refresh_single(n_clicks_list, button_ids, current_trigger, surveys_da
         survey_id = button_id.get('index')
         
         if survey_id:
-            # Debounce: prevent duplicate triggers within 2 seconds
             import time
             current_time = time.time()
             with _individual_refresh_lock:
@@ -1593,12 +1510,10 @@ def handle_refresh_single(n_clicks_list, button_ids, current_trigger, surveys_da
             
             log(f"Individual refresh for survey {survey_id} - checking this survey only", "WARN")
             
-            # Clear cache for this survey
             if jazzhr_cache.get(survey_id):
                 jazzhr_cache.delete(survey_id)
                 jazzhr_cache.save()
             
-            # Find the survey data
             survey = None
             if surveys_data:
                 for s in surveys_data:
@@ -1607,12 +1522,10 @@ def handle_refresh_single(n_clicks_list, button_ids, current_trigger, surveys_da
                         break
             
             if survey:
-                # Get name for display
                 first_name = survey.get('firstName', '')
                 last_name = survey.get('lastName', '')
                 pdf_url = survey.get('pdf_url')
                 
-                # Check just this one survey in background
                 def check_single():
                     try:
                         if pdf_url:
@@ -1623,15 +1536,13 @@ def handle_refresh_single(n_clicks_list, button_ids, current_trigger, surveys_da
                         jazzhr_service.check_surveys_batch([survey], {survey_id: pdf_url}, pdf_sizes)
                         log(f"Completed individual check for survey {survey_id}", "WARN")
                         
-                        # Signal background check completion to trigger UI refresh
-                        global _background_check_needs_signal
-                        _background_check_needs_signal = True
+                        cache_mgr = get_cache_manager()
+                        cache_mgr.app_state.request_ui_signal()
                     except Exception as e:
                         log(f"Error checking survey {survey_id}: {e}", "ERROR")
                 
                 Thread(target=check_single, daemon=True).start()
                 
-                # Show status message - UI will auto-update when background check completes
                 full_name = f"{first_name} {last_name}".strip() or f"survey {survey_id}"
                 return dash.no_update, f"Checking {full_name}..."
             else:
@@ -1649,14 +1560,102 @@ def handle_refresh_single(n_clicks_list, button_ids, current_trigger, surveys_da
     prevent_initial_call=True
 )
 def monitor_background_check(n_intervals, current_signal):
-    """Monitor background check completion and signal UI updates."""
-    global _background_check_needs_signal
+    cache_mgr = get_cache_manager()
     
-    if _background_check_needs_signal:
-        _background_check_needs_signal = False
+    if cache_mgr.check_ui_signal():
         return current_signal + 1
     
     return dash.no_update
+
+
+@callback(
+    Output("notification-data", "data"),
+    Input("notification-check-interval", "n_intervals"),
+    prevent_initial_call=False
+)
+def check_for_new_surveys(n_intervals):
+    cache_mgr = get_cache_manager()
+    
+    try:
+        if hasattr(jazzhr_cache.cache, '_redis') and jazzhr_cache.cache._redis:
+            import json
+            redis_client = jazzhr_cache.cache._redis
+            data = redis_client.get("new_surveys_notification")
+            
+            if data:
+                notification = json.loads(data)
+                if not notification.get("acknowledged", False):
+                    return notification
+    except Exception as e:
+        log(f"Error checking Redis notification: {e}", "ERROR")
+    
+    return cache_mgr.get_notification()
+
+
+@callback(
+    [Output("new-surveys-banner", "children"),
+     Output("new-surveys-banner", "className")],
+    Input("notification-data", "data"),
+    prevent_initial_call=False
+)
+def show_notification_banner(notification):
+    count = notification.get("count", 0) if notification else 0
+    
+    if count > 0:
+        timestamp_str = notification.get("timestamp", "")
+        try:
+            if timestamp_str:
+                dt = datetime.fromisoformat(timestamp_str)
+                time_str = dt.strftime("%I:%M %p")
+            else:
+                time_str = "recently"
+        except:
+            time_str = "recently"
+        
+        plural = "s" if count != 1 else ""
+        content = [
+            html.Span("New Surveys: ", className="badge-label"),
+            html.Span(str(count), className="badge-count pulse"),
+            html.Span(f" ({time_str})", className="badge-time")
+        ]
+        return content, "surveys-badge has-new-surveys"
+    else:
+        content = [
+            html.Span("New Surveys: ", className="badge-label"),
+            html.Span("0", className="badge-count")
+        ]
+        return content, "surveys-badge no-new-surveys"
+
+
+@callback(
+    Output("refresh-trigger", "data", allow_duplicate=True),
+    Input("new-surveys-banner", "n_clicks"),
+    State("refresh-trigger", "data"),
+    State("notification-data", "data"),
+    prevent_initial_call=True
+)
+def handle_banner_click(n_clicks, current_trigger, notification):
+    if not n_clicks or n_clicks == 0:
+        return dash.no_update
+    
+    # Only refresh if there are actually new surveys
+    count = notification.get("count", 0) if notification else 0
+    if count == 0:
+        return dash.no_update
+    
+    cache_mgr = get_cache_manager()
+    
+    cache_mgr.acknowledge_notification()
+    
+    try:
+        if hasattr(jazzhr_cache.cache, '_redis') and jazzhr_cache.cache._redis:
+            jazzhr_cache.cache._redis.delete("new_surveys_notification")
+    except Exception as e:
+        log(f"Error clearing Redis notification: {e}", "ERROR")
+    
+    log("User clicked notification banner, refreshing page", "WARN")
+    return current_trigger + 1
+
 
 @callback(
     Output({"type": "survey-checkbox", "index": ALL}, "value"),
