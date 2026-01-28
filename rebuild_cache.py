@@ -13,9 +13,9 @@ from typing import Dict
 load_dotenv()
 
 # Import app modules
-from cultureindex_client import CultureIndexClient
+from cultureindex_client_1 import CultureIndexClient
 from check_jazzhr_uploads import JazzHRUploadChecker
-from cache_storage import create_cache, SmartJazzHRCache, CACHE_ENTRY_VERSION
+from cache_storage_1 import create_cache, SmartJazzHRCache, CACHE_ENTRY_VERSION
 
 # Configuration
 CLIENT_ID = os.getenv('CLIENT_ID', 'A89F5B0000')
