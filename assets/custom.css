@@ -435,8 +435,58 @@ body {
     grid-template-columns: repeat(4, 1fr);
     gap: 16px 24px;
     position: relative;
-    margin-bottom: 0;
+    margin-bottom: 16px;
     padding-right: 200px; /* Space for checkbox and upload button with more separation */
+}
+
+.survey-footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding-top: 12px;
+    padding-right: 120px;
+    border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.last-checked-info {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.last-checked-label {
+    font-size: 13px;
+    color: var(--text-tertiary);
+    font-weight: 500;
+}
+
+.last-checked-value {
+    font-size: 13px;
+    color: var(--text-secondary);
+    font-weight: 400;
+}
+
+.refresh-single-btn {
+    background-color: rgba(249, 168, 37, 0.1);
+    color: var(--brand-yellow);
+    border: 1px solid rgba(249, 168, 37, 0.3);
+    padding: 6px 16px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+    transition: all 0.2s ease;
+    font-family: 'Inter', sans-serif;
+}
+
+.refresh-single-btn:hover {
+    background-color: rgba(249, 168, 37, 0.2);
+    border-color: var(--brand-yellow);
+    transform: translateY(-1px);
+}
+
+.refresh-single-btn:active {
+    transform: translateY(0);
 }
 
 .info-field {
