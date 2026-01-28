@@ -758,55 +758,7 @@ Note: Survey numbers use 1-based indexing (survey 1 is the first survey)
     if 'error' in stats:
         return 1
     
-    print("\n" + "="*60)
-    print("SUMMARY")
-    print("="*60)
-    print(f"Total surveys in file: {stats['total']}")
-    if 'range_start' in stats:
-        print(f"Range checked: surveys {stats['range_start']}-{stats['range_end']} ({stats['checked_in_range']} surveys)")
-    print(f"Surveys checked: {stats['checked']}")
-    print(f"Found in JazzHR: {stats['found_in_jazzhr']}")
-    print(f"PDF uploaded: {stats['pdf_uploaded']}")
-    print(f"PDF not uploaded: {stats['pdf_not_uploaded']}")
-    print(f"Not found in JazzHR: {stats['not_found_in_jazzhr']}")
-    print(f"No PDF URL: {stats['no_pdf_url']}")
-    
-    if 'performance' in stats:
-        perf = stats['performance']
-        print("\n" + "="*60)
-        print("PERFORMANCE METRICS")
-        print("="*60)
-        print(f"Total execution time: {perf['total_time']:.2f}s ({perf['total_time']/60:.1f} minutes)")
-        print(f"  - Load time: {perf['load_time']:.2f}s")
-        print(f"  - Processing time: {perf['processing_time']:.2f}s ({perf['processing_time']/60:.1f} minutes)")
-        print(f"  - Save time: {perf['save_time']:.2f}s")
-        print(f"\nAPI Performance:")
-        print(f"  - Total API calls: {perf['api_calls']}")
-        print(f"  - Average API call time: {perf['avg_api_call_time']:.3f}s")
-        print(f"  - Min API call time: {perf['min_api_call_time']:.3f}s")
-        print(f"  - Max API call time: {perf['max_api_call_time']:.3f}s")
-        print(f"\nOperation Timings:")
-        print(f"  - Average search time: {perf['avg_search_time']:.3f}s")
-        print(f"  - Average file check time: {perf['avg_file_check_time']:.3f}s")
-        print(f"  - Average per survey: {perf['avg_per_survey']:.3f}s")
-        
-        print("\n" + "="*60)
-        print("BOTTLENECK ANALYSIS")
-        print("="*60)
-        if perf['max_api_call_time'] > 5.0:
-            print(f"WARNING: Slowest API call took {perf['max_api_call_time']:.2f}s")
-        if perf['avg_api_call_time'] > 1.0:
-            print(f"WARNING: Average API call time is high ({perf['avg_api_call_time']:.3f}s)")
-        else:
-            print(f"API calls are performing well (avg {perf['avg_api_call_time']:.3f}s)")
-        
-        total_api_time = sum([perf['avg_api_call_time'] * perf['api_calls']])
-        if perf['processing_time'] > 0:
-            api_percentage = (total_api_time / perf['processing_time']) * 100
-            print(f"API calls account for ~{api_percentage:.1f}% of processing time")
-    
     return 0
 
 if __name__ == "__main__":
     sys.exit(main())
-
