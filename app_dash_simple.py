@@ -1561,17 +1561,21 @@ def handle_refresh_single(n_clicks_list, button_ids, current_trigger, surveys_da
 )
 def monitor_background_check(n_intervals, current_signal):
     try:
+        # Ensure we always return a valid integer
+        if current_signal is None or not isinstance(current_signal, (int, float)):
+            current_signal = 0
+        
         cache_mgr = get_cache_manager()
         
         if cache_mgr.check_ui_signal():
-            if current_signal is None:
-                current_signal = 0
-            return current_signal + 1
+            return int(current_signal) + 1
         
         return dash.no_update
     except Exception as e:
         log(f"Error in monitor_background_check: {e}", "ERROR")
-        return dash.no_update
+        import traceback
+        log(f"Traceback: {traceback.format_exc()}", "ERROR")
+        return 0  # Return valid integer instead of dash.no_update on error
 
 
 @callback(
@@ -1613,10 +1617,15 @@ def check_for_new_surveys(n_intervals):
 )
 def show_notification_banner(notification):
     try:
+        # Validate input
         if not notification or not isinstance(notification, dict):
             notification = {"count": 0}
         
+        # Ensure count is a valid number
         count = notification.get("count", 0)
+        if not isinstance(count, (int, float)):
+            count = 0
+        count = int(count)
         
         if count > 0:
             timestamp_str = notification.get("timestamp", "")
@@ -1644,6 +1653,9 @@ def show_notification_banner(notification):
             return content, "surveys-badge no-new-surveys"
     except Exception as e:
         log(f"Error in show_notification_banner: {e}", "ERROR")
+        import traceback
+        log(f"Traceback: {traceback.format_exc()}", "ERROR")
+        # Return safe default
         content = [
             html.Span("New Surveys: ", className="badge-label"),
             html.Span("0", className="badge-count")
