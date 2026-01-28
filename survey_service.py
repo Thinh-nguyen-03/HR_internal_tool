@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
-from cultureindex_client import CultureIndexClient, CultureIndexAuthError
+from cultureindex_client_1 import CultureIndexClient, CultureIndexAuthError
 from surveys_fetch import format_phone_number, convert_to_central_date, get_survey_urls_from_csv
 
 from cache_manager import ThreadSafeCache, handle_errors
