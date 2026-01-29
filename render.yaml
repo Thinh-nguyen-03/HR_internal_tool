@@ -15,12 +15,11 @@ services:
 
   - type: cron
     name: survey-sync-hourly
-    runtime: image
+    runtime: python
     plan: starter
-    image:
-      url: docker.io/python:3.11-slim
     schedule: "0 * * * *"
-    startCommand: sh -c "pip install requests && python trigger_background_refresh.py"
+    buildCommand: pip install -r requirements.txt
+    startCommand: python trigger_background_refresh.py
     envVars:
       - key: APP_URL
         sync: false
@@ -29,4 +28,3 @@ services:
           name: culture-index-hr-tool
           type: web
           envVarKey: BACKGROUND_JOB_SECRET
-
