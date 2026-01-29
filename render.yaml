@@ -20,14 +20,7 @@ services:
     image:
       url: docker.io/curlimages/curl:latest
     schedule: "0 * * * *"
-    dockerCommand: >-
-      sh -c 'curl -X POST
-      -H "Authorization: Bearer $BACKGROUND_JOB_SECRET"
-      -H "Content-Type: application/json"
-      --max-time 120
-      --retry 3
-      --retry-delay 10
-      "$APP_URL/api/background-refresh"'
+    dockerCommand: "sh -c 'curl -X POST -H \"Authorization: Bearer $BACKGROUND_JOB_SECRET\" -H \"Content-Type: application/json\" --max-time 120 --retry 3 --retry-delay 10 \"$APP_URL/api/background-refresh\"'"
     envVars:
       - key: APP_URL
         sync: false
