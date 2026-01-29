@@ -19,7 +19,7 @@ services:
     plan: starter
     buildCommand: pip install -r requirements.txt
     schedule: "0 * * * *"
-    runCommand: python trigger_background_refresh.py
+    command: python trigger_background_refresh.py
     envVars:
       - key: APP_URL
         sync: false
