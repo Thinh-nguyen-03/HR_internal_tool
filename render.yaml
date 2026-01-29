@@ -15,10 +15,11 @@ services:
 
   - type: cron
     name: survey-sync-hourly
-    runtime: docker
+    runtime: image
     plan: starter
     repo: https://github.com/Thinh-nguyen-03/Hiring-Process-Automation  # Use main repo
-    dockerImage: curlimages/curl:latest
+    image:
+      url: docker.io/curlimages/curl:latest
     schedule: "0 * * * *"
     dockerCommand: |
       curl -X POST \
