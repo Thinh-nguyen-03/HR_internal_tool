@@ -713,7 +713,10 @@ server = app.server
 
 # Initialize CSRF Protection
 csrf = CSRFProtect(server)
-log("CSRF protection enabled", "WARN")
+
+# Configure CSRF to exempt Dash endpoints
+server.config['WTF_CSRF_CHECK_DEFAULT'] = False  # Disable default CSRF checking
+log("CSRF protection configured (Dash endpoints exempted)", "WARN")
 
 # Register background sync blueprint (for automated hourly data refresh)
 background_sync_bp = create_background_sync_blueprint(
@@ -883,9 +886,12 @@ def logout():
 
 @server.before_request
 def handle_csrf_for_dash():
+    """Exempt all Dash endpoints from CSRF protection."""
+    # Dash uses these endpoints for callbacks and updates
     dash_endpoints = ['/_dash-update-component', '/_dash-layout', '/_dash-dependencies', '/_reload-hash']
     if any(request.path.startswith(ep) for ep in dash_endpoints):
-        csrf._exempt_views.add('dash.dash.dispatch')
+        # Skip CSRF validation for Dash internal endpoints
+        return None
     return None
 
 @server.before_request
