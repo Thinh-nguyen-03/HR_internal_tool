@@ -15,12 +15,11 @@ services:
 
   - type: cron
     name: survey-sync-hourly
-    runtime: image
+    runtime: python
     plan: starter
-    image:
-      url: docker.io/curlimages/curl:latest
+    buildCommand: pip install -r requirements.txt
     schedule: "0 * * * *"
-    dockerCommand: "sh -c 'curl -X POST -H \"Authorization: Bearer $BACKGROUND_JOB_SECRET\" -H \"Content-Type: application/json\" --max-time 120 --retry 3 --retry-delay 10 \"$APP_URL/api/background-refresh\"'"
+    runCommand: python trigger_background_refresh.py
     envVars:
       - key: APP_URL
         sync: false
