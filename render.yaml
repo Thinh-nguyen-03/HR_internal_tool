@@ -17,7 +17,6 @@ services:
     name: survey-sync-hourly
     runtime: image
     plan: starter
-    repo: https://github.com/Thinh-nguyen-03/Hiring-Process-Automation  # Use main repo
     image:
       url: docker.io/curlimages/curl:latest
     schedule: "0 * * * *"
