@@ -1378,57 +1378,6 @@ def handle_search(search_value, n_submit, clear_clicks):
 
 @callback(
     [Output("refresh-trigger", "data", allow_duplicate=True),
-     Output("search-query", "data", allow_duplicate=True),
-     Output("current-page", "data", allow_duplicate=True),
-     Output("search-input", "value", allow_duplicate=True)],
-    Input("refresh-btn", "n_clicks"),
-    State("refresh-trigger", "data"),
-    prevent_initial_call=True
-)
-def handle_refresh_ci(n_clicks, current_trigger):
-    if not n_clicks:
-        return dash.no_update, dash.no_update, dash.no_update, dash.no_update
-    
-    cache_mgr = get_cache_manager()
-    
-    log("Refresh CI button clicked - starting reload process", "WARN")
-    
-    survey_service.clear_cache()
-    background_checker.stop_checking()
-    
-    cache_mgr.on_data_refresh_start()
-    log("Survey cache cleared", "WARN")
-    
-    def _reload():
-        try:
-            log("Background reload thread started", "WARN")
-            survey_service.load_surveys(force_refresh=True)
-            all_surveys = survey_service.get_all_surveys()
-            log(f"Reload complete, got {len(all_surveys)} surveys", "WARN")
-            
-            if all_surveys:
-                recent_ids = [str(s['surveyId']) for s in all_surveys[:RECENT_SURVEY_THRESHOLD]]
-                jazzhr_cache.set_recent_surveys(recent_ids)
-                log(f"Updated recent surveys cache with {len(recent_ids)} IDs", "WARN")
-            
-            cache_mgr.on_data_refresh_complete()
-            log("Cache manager notified of refresh completion", "WARN")
-            
-            log("Starting background JazzHR checker", "WARN")
-            background_checker.start_checking()
-            log("Refresh CI process fully completed", "WARN")
-        except Exception as e:
-            log(f"Refresh CI error: {e}", "ERROR")
-            import traceback
-            traceback.print_exc()
-    
-    Thread(target=_reload, daemon=True, name="RefreshCIThread").start()
-    log("Reload thread spawned, returning to UI", "WARN")
-    
-    return current_trigger + 1, "", 1, ""
-
-@callback(
-    [Output("refresh-trigger", "data", allow_duplicate=True),
      Output("upload-status", "children", allow_duplicate=True)],
     Input("refresh-jazzhr-btn", "n_clicks"),
     [State("current-page", "data"),
@@ -1687,15 +1636,66 @@ def handle_banner_click(n_clicks, current_trigger, notification):
     
     cache_mgr = get_cache_manager()
     
+    log("User clicked notification banner - starting reload process", "WARN")
+    
+    # Clear the notification FIRST (before reload starts)
     cache_mgr.acknowledge_notification()
     
+    # Delete notification from Redis completely (safer than update - avoids race conditions)
+    redis_deleted = False
     try:
         if hasattr(jazzhr_cache.cache, '_redis') and jazzhr_cache.cache._redis:
-            jazzhr_cache.cache._redis.delete("new_surveys_notification")
+            redis_client = jazzhr_cache.cache._redis
+            
+            # Try deleting up to 3 times to ensure it succeeds
+            for attempt in range(3):
+                result = redis_client.delete("new_surveys_notification")
+                if result > 0:
+                    redis_deleted = True
+                    log(f"Redis notification deleted successfully on attempt {attempt + 1}", "WARN")
+                    break
+                elif attempt < 2:
+                    log(f"Redis delete attempt {attempt + 1} failed, retrying...", "WARN")
+                    time.sleep(0.1)
+            
+            if not redis_deleted:
+                log("Redis notification delete failed after 3 attempts - may reappear on reload", "ERROR")
     except Exception as e:
-        log(f"Error clearing Redis notification: {e}", "ERROR")
+        log(f"Error deleting Redis notification: {e}", "ERROR")
     
-    log("User clicked notification banner, refreshing page", "WARN")
+    # Clear surveys and stop background checker
+    survey_service.clear_cache()
+    background_checker.stop_checking()
+    
+    cache_mgr.on_data_refresh_start()
+    log("Survey cache cleared after banner click", "WARN")
+    
+    def _reload():
+        try:
+            log("Background reload thread started from banner click", "WARN")
+            survey_service.load_surveys(force_refresh=True)
+            all_surveys = survey_service.get_all_surveys()
+            log(f"Reload complete, got {len(all_surveys)} surveys", "WARN")
+            
+            if all_surveys:
+                recent_ids = [str(s['surveyId']) for s in all_surveys[:RECENT_SURVEY_THRESHOLD]]
+                jazzhr_cache.set_recent_surveys(recent_ids)
+                log(f"Updated recent surveys cache with {len(recent_ids)} IDs", "WARN")
+            
+            cache_mgr.on_data_refresh_complete()
+            log("Cache manager notified of refresh completion", "WARN")
+            
+            log("Starting background JazzHR checker", "WARN")
+            background_checker.start_checking()
+            log("Banner click refresh process fully completed", "WARN")
+        except Exception as e:
+            log(f"Banner click refresh error: {e}", "ERROR")
+            import traceback
+            traceback.print_exc()
+    
+    Thread(target=_reload, daemon=True, name="BannerClickRefreshThread").start()
+    log("Reload thread spawned from banner click, returning to UI", "WARN")
+    
     return current_trigger + 1
 
 
