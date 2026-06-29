@@ -2,7 +2,10 @@ import os
 import sys
 import time
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+
+CENTRAL_TZ = ZoneInfo("America/Chicago")
 from threading import RLock, Thread, Lock, Event
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Tuple
@@ -1048,7 +1051,7 @@ def serve_layout():
                             dcc.Input(
                                 id="search-input",
                                 type="text",
-                                placeholder="Search by name...",
+                                placeholder="Search by name",
                                 debounce=False,
                                 className="search-input"
                             ),
@@ -1069,7 +1072,15 @@ def serve_layout():
                     html.Div(id="loading-indicator", className="loading-indicator", style={"display": "none"}),
                 ], className="surveys-header"),
                 
-                html.Div(id="surveys-container", className="surveys-list"),
+                dcc.Loading(
+                    id="surveys-loading",
+                    type="default",
+                    custom_spinner=html.Div([
+                        html.Div(html.Div(className="progress-fill"), className="progress-track"),
+                        html.Span("Working", className="progress-label"),
+                    ], className="progress-wrap"),
+                    children=html.Div(id="surveys-container", className="surveys-list"),
+                ),
                 
                 html.Div([
                     html.Div([
@@ -1159,7 +1170,7 @@ def build_survey_display_local(surveys: List[Dict], jazzhr_results: Dict, pdf_si
         })
         
         if status is None:
-            status_indicator = html.Div([html.Span("Checking...", className="status-text")], className="status-pending")
+            status_indicator = html.Div([html.Span("Checking", className="status-text")], className="status-pending")
         elif is_uploaded:
             status_indicator = html.Div([html.Span("Uploaded", className="status-text")], className="status-uploaded")
         elif status == "NOT_UPLOADED":
@@ -1283,7 +1294,7 @@ def display_surveys(page, search_query, refresh_trigger, background_signal):
     
     # Try to acquire callback lock (non-blocking)
     if not cache_mgr.callback_lock.try_acquire("display_surveys"):
-        return build_loading_result("Loading surveys...")
+        return build_loading_result("Loading surveys")
     
     try:
         start_time = time.time()
@@ -1293,7 +1304,7 @@ def display_surveys(page, search_query, refresh_trigger, background_signal):
         
         if not survey_service.is_loaded():
             if survey_service.is_loading():
-                return build_loading_result("Refreshing surveys from Culture Index...")
+                return build_loading_result("Refreshing surveys from Culture Index")
             
             log(f"First request - loading surveys (trigger={triggered_id})", "WARN")
             try:
@@ -1310,7 +1321,7 @@ def display_surveys(page, search_query, refresh_trigger, background_signal):
         
         if not survey_service.is_loaded():
             if survey_service.is_loading():
-                return build_loading_result("Refreshing surveys from Culture Index...")
+                return build_loading_result("Refreshing surveys from Culture Index")
             return build_error_result("Failed to load survey data")
         
         if search_query and len(search_query) >= 2:
@@ -1513,7 +1524,7 @@ def handle_refresh_jazzhr(n_clicks, current_page, search_query, current_trigger)
         log("JazzHR cache saved to storage", "WARN")
     
     log("Triggering UI refresh to re-check surveys", "WARN")
-    return current_trigger + 1, "Refreshing JazzHR status..."
+    return current_trigger + 1, "Refreshing JazzHR status"
 
 _last_individual_refresh = {}
 _individual_refresh_lock = RLock()
@@ -1593,10 +1604,10 @@ def handle_refresh_single(n_clicks_list, button_ids, current_trigger, surveys_da
                 Thread(target=check_single, daemon=True).start()
                 
                 full_name = f"{first_name} {last_name}".strip() or f"survey {survey_id}"
-                return dash.no_update, f"Checking {full_name}..."
+                return dash.no_update, f"Checking {full_name}"
             else:
                 log(f"Survey {survey_id} not found in current page data", "WARN")
-                return dash.no_update, f"Checking survey {survey_id}..."
+                return dash.no_update, f"Checking survey {survey_id}"
     except Exception as e:
         log(f"Error in individual refresh: {e}", "ERROR")
     
@@ -1681,10 +1692,13 @@ def show_notification_banner(notification):
             try:
                 if timestamp_str:
                     dt = datetime.fromisoformat(timestamp_str)
-                    time_str = dt.strftime("%I:%M %p")
+                    # Treat naive timestamps as UTC, then show in Central Time.
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    time_str = dt.astimezone(CENTRAL_TZ).strftime("%I:%M %p")
                 else:
                     time_str = "recently"
-            except:
+            except Exception:
                 time_str = "recently"
             
             plural = "s" if count != 1 else ""
@@ -1871,7 +1885,7 @@ def handle_upload_selected(n_clicks, checkbox_values, surveys_data, existing_que
     if not queue:
         return [], {}, True, "No uploadable surveys"
     
-    return queue, {}, False, f"Uploading 0/{len(queue)}..."
+    return queue, {}, False, f"Uploading 0/{len(queue)}"
 
 @callback(
     [Output("upload-queue", "data", allow_duplicate=True),
@@ -1931,7 +1945,7 @@ def handle_single_upload(n_clicks_list, surveys_data, existing_queue):
     }]
     
     name = f"{survey_data.get('firstName', '')} {survey_data.get('lastName', '')}".strip()
-    return queue, {}, False, f"Uploading {name}..."
+    return queue, {}, False, f"Uploading {name}"
 
 @callback(
     [Output("upload-queue", "data", allow_duplicate=True),
@@ -1986,11 +2000,11 @@ def process_upload_queue(n_intervals, queue, results, refresh_trigger):
                 _completed_uploads.clear()
                 return remaining, results, True, msg, refresh_trigger + 1
             
-            return remaining, results, False, f"Processing {len(results)}/{len(results)+len(remaining)}...", dash.no_update
+            return remaining, results, False, f"Processing {len(results)}/{len(results)+len(remaining)}", dash.no_update
         
         if survey_id in _active_uploads:
             log(f"Skipping {survey_id} - actively processing", "WARN")
-            return dash.no_update, dash.no_update, dash.no_update, "Processing...", dash.no_update
+            return dash.no_update, dash.no_update, dash.no_update, "Processing", dash.no_update
         
         _active_uploads.add(survey_id)
     
@@ -2033,7 +2047,7 @@ def process_upload_queue(n_intervals, queue, results, refresh_trigger):
     completed = len(results)
     total = completed + len(remaining)
     
-    return remaining, results, False, f"Uploading {completed}/{total}...", dash.no_update
+    return remaining, results, False, f"Uploading {completed}/{total}", dash.no_update
 
 if __name__ == "__main__":
     log("Starting Dash app on port 8051...", "WARN")
