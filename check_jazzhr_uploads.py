@@ -426,21 +426,20 @@ class JazzHRUploadChecker:
             if not self.api_key:
                 return {"success": False, "error": "API key is None or empty in JazzHRUploadChecker"}
             
-            url = f"{self.base_url}/files?apikey={self.api_key}"
-
-            multipart = {
-                "applicant_id": (None, applicant_id),
-                "filename": (None, filename),
-                "file_data": (None, file_data),
-                "file_privacy": (None, "0"),
-            }
+            from urllib.parse import urlencode
+            qs = urlencode({
+                "applicant_id": applicant_id,
+                "filename": filename,
+                "file_privacy": "0",
+            })
+            url = f"{self.base_url}/files?apikey={self.api_key}&{qs}"
 
             if verbose:
                 print(f"    [UPLOAD] Uploading {filename} to applicant {applicant_id}...")
-                print(f"    [UPLOAD] URL: {self.base_url}/files?apikey=***")
-                print(f"    [UPLOAD] Sending as multipart/form-data with keys: {list(multipart.keys())}")
+                print(f"    [UPLOAD] URL: {self.base_url}/files?apikey=***&{qs}")
+                print(f"    [UPLOAD] Sending file_data in POST body ({len(file_data)} chars base64)")
 
-            resp = self.session.post(url, files=multipart, timeout=60)
+            resp = self.session.post(url, data={"file_data": file_data}, timeout=60)
             resp.raise_for_status()
             
             result = resp.json()
