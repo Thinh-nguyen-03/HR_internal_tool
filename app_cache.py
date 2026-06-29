@@ -13,65 +13,140 @@ def log(message: str, level: str = "INFO") -> None:
 
 
 class AppState:
+    _RK_VERSION = 'app:data_version'
+    _RK_JAZZHR_DONE = 'app:jazzhr_check_complete'
+    _RK_UI_SIGNAL = 'app:ui_signal'
+    _RK_LAST_REFRESH = 'app:last_data_refresh'
+
     def __init__(self):
         self._lock = RLock()
-        
+        self._redis = None
+
         self._data_version = 0
-        
         self._jazzhr_initial_check_complete = False
         self._background_check_needs_signal = False
-        
         self._last_data_refresh: Optional[datetime] = None
-        
         self._new_surveys_count = 0
         self._new_surveys_ids: List[str] = []
         self._notification_acknowledged = True
-    
+
+    def set_redis_client(self, redis_client) -> None:
+        with self._lock:
+            self._redis = redis_client
+            try:
+                val = redis_client.get(self._RK_VERSION)
+                if val is not None:
+                    self._data_version = int(val)
+            except Exception:
+                pass
+
+    def _redis_get(self, key: str) -> Optional[str]:
+        try:
+            val = self._redis.get(key)
+            if val is None:
+                return None
+            return val.decode() if isinstance(val, bytes) else str(val)
+        except Exception:
+            return None
+
     def increment_version(self) -> int:
         with self._lock:
+            if self._redis:
+                try:
+                    val = self._redis.incr(self._RK_VERSION)
+                    self._data_version = int(val)
+                    return self._data_version
+                except Exception:
+                    pass
             self._data_version += 1
             return self._data_version
-    
+
     def get_version(self) -> int:
         with self._lock:
+            if self._redis:
+                val = self._redis_get(self._RK_VERSION)
+                if val is not None:
+                    self._data_version = int(val)
             return self._data_version
-    
+
     def set_jazzhr_check_complete(self, complete: bool) -> None:
         with self._lock:
             self._jazzhr_initial_check_complete = complete
+            if self._redis:
+                try:
+                    if complete:
+                        self._redis.setex(self._RK_JAZZHR_DONE, 86400, '1')
+                    else:
+                        self._redis.delete(self._RK_JAZZHR_DONE)
+                except Exception:
+                    pass
             if complete:
                 log("JazzHR initial checks marked complete", "WARN")
-    
+
     def is_jazzhr_check_complete(self) -> bool:
         with self._lock:
+            if self._redis:
+                val = self._redis_get(self._RK_JAZZHR_DONE)
+                if val is not None:
+                    self._jazzhr_initial_check_complete = (val == '1')
+                    return self._jazzhr_initial_check_complete
             return self._jazzhr_initial_check_complete
-    
+
     def request_ui_signal(self) -> None:
         with self._lock:
             self._background_check_needs_signal = True
-    
+            if self._redis:
+                try:
+                    self._redis.setex(self._RK_UI_SIGNAL, 300, '1')
+                except Exception:
+                    pass
+
     def consume_ui_signal(self) -> bool:
         with self._lock:
+            if self._redis:
+                try:
+                    pipe = self._redis.pipeline(transaction=True)
+                    pipe.get(self._RK_UI_SIGNAL)
+                    pipe.delete(self._RK_UI_SIGNAL)
+                    results = pipe.execute()
+                    if results[0] is not None:
+                        self._background_check_needs_signal = False
+                        return True
+                    return False
+                except Exception:
+                    pass
             if self._background_check_needs_signal:
                 self._background_check_needs_signal = False
                 return True
             return False
-    
+
     def record_data_refresh(self) -> None:
         with self._lock:
             self._last_data_refresh = datetime.now()
-    
+            if self._redis:
+                try:
+                    self._redis.setex(self._RK_LAST_REFRESH, 86400, self._last_data_refresh.isoformat())
+                except Exception:
+                    pass
+
     def get_last_refresh(self) -> Optional[datetime]:
         with self._lock:
+            if self._redis:
+                val = self._redis_get(self._RK_LAST_REFRESH)
+                if val:
+                    try:
+                        return datetime.fromisoformat(val)
+                    except Exception:
+                        pass
             return self._last_data_refresh
-    
+
     def set_new_surveys_notification(self, count: int, survey_ids: List[str]) -> None:
         with self._lock:
             self._new_surveys_count = count
             self._new_surveys_ids = survey_ids[:10]
             self._notification_acknowledged = False
             log(f"New surveys notification set: {count} surveys", "WARN")
-    
+
     def get_notification(self) -> Dict:
         with self._lock:
             if self._notification_acknowledged or self._new_surveys_count == 0:
@@ -82,19 +157,28 @@ class AppState:
                 "timestamp": self._last_data_refresh.isoformat() if self._last_data_refresh else None,
                 "acknowledged": False
             }
-    
+
     def acknowledge_notification(self) -> None:
         with self._lock:
             self._notification_acknowledged = True
             self._new_surveys_count = 0
             self._new_surveys_ids = []
             log("Notification acknowledged", "WARN")
-    
+
     def reset_for_refresh(self) -> None:
         with self._lock:
             self._jazzhr_initial_check_complete = False
             self._background_check_needs_signal = False
-            self._data_version += 1
+            if self._redis:
+                try:
+                    self._redis.delete(self._RK_JAZZHR_DONE)
+                    self._redis.delete(self._RK_UI_SIGNAL)
+                    val = self._redis.incr(self._RK_VERSION)
+                    self._data_version = int(val)
+                except Exception:
+                    self._data_version += 1
+            else:
+                self._data_version += 1
             log(f"App state reset for refresh (version {self._data_version})", "WARN")
 
 
@@ -268,12 +352,15 @@ class CacheManager:
                     log(f"Surveys APPEARED: {list(appeared)[:5]}", "WARN")
             self._last_displayed_surveys = survey_ids.copy()
     
+    def set_redis_client(self, redis_client) -> None:
+        self.app_state.set_redis_client(redis_client)
+
     def check_ui_signal(self) -> bool:
         return self.app_state.consume_ui_signal()
-    
+
     def get_notification(self) -> Dict:
         return self.app_state.get_notification()
-    
+
     def acknowledge_notification(self) -> None:
         self.app_state.acknowledge_notification()
 
