@@ -539,7 +539,7 @@ def fetch_pdf_sizes(urls: Dict[str, str], pdf_cache, max_workers: int = 8) -> Di
                 survey_id, size, error = future.result()
                 if size:
                     results[survey_id] = size
-                    pdf_cache.set(survey_id, {'size': size})
+                    pdf_cache.set(survey_id, {'size': size, 'status': 'pdf_size', 'isUploaded': False})
             except:
                 pass
     
