@@ -11,6 +11,63 @@ _last_refresh_time = 0
 _refresh_cooldown = 300
 
 
+def perform_survey_refresh(survey_service, jazzhr_cache, background_checker, recent_threshold):
+    """Core survey refresh: reload from Culture Index, diff against current state,
+    store a 'new surveys' notification in Redis, and kick off JazzHR checks.
+
+    Shared by the hourly cron endpoint and the in-app periodic refresher so both
+    paths behave identically. Returns a summary dict. Caller handles rate limiting.
+    """
+    cache_mgr = get_cache_manager()
+
+    if survey_service.is_loading():
+        log("Survey refresh skipped: already loading", "WARN")
+        return {"status": "skipped", "reason": "load in progress"}
+
+    old_surveys = survey_service.get_all_surveys()
+    old_ids = set(str(s['surveyId']) for s in old_surveys) if old_surveys else set()
+
+    # Reload first, then decide whether anything actually changed. We only do the
+    # heavy reset (invalidate render cache, bump version, re-run JazzHR checks)
+    # when the survey set changed, so a frequent idle refresh is cheap and doesn't
+    # flicker the UI back into a "checking" state.
+    survey_service.load_surveys(force_refresh=True)
+
+    new_surveys = survey_service.get_all_surveys()
+    new_ids = set(str(s['surveyId']) for s in new_surveys)
+    added_ids = list(new_ids - old_ids)
+    removed_ids = list(old_ids - new_ids)
+
+    log(f"Survey refresh: {len(old_ids)} -> {len(new_ids)} (added {len(added_ids)}, removed {len(removed_ids)})", "WARN")
+
+    if new_surveys:
+        recent_ids = [str(s['surveyId']) for s in new_surveys[:recent_threshold]]
+        jazzhr_cache.set_recent_surveys(recent_ids)
+
+    changed = bool(added_ids or removed_ids)
+    if changed:
+        cache_mgr.on_data_refresh_start()
+        cache_mgr.on_data_refresh_complete(
+            new_survey_count=len(added_ids),
+            new_survey_ids=added_ids
+        )
+        if len(added_ids) > 0:
+            _store_notification_redis(jazzhr_cache, added_ids)
+        background_checker.start_checking()
+    elif not cache_mgr.app_state.is_jazzhr_check_complete():
+        # No survey change, but the initial JazzHR pass never finished — run it.
+        background_checker.start_checking()
+
+    return {
+        "status": "success",
+        "old_count": len(old_ids),
+        "new_count": len(new_ids),
+        "added": len(added_ids),
+        "removed": len(removed_ids),
+        "added_ids": added_ids[:5],
+    }
+
+
 def create_background_sync_blueprint(survey_service, jazzhr_cache, background_checker, recent_threshold):
     bp = Blueprint('background_sync', __name__)
     
@@ -58,9 +115,7 @@ def create_background_sync_blueprint(survey_service, jazzhr_cache, background_ch
     @require_bearer_token
     def background_refresh():
         global _last_refresh_time
-        
-        cache_mgr = get_cache_manager()
-        
+
         # Check rate limit
         allowed, retry_after = check_rate_limit()
         if not allowed:
@@ -71,71 +126,21 @@ def create_background_sync_blueprint(survey_service, jazzhr_cache, background_ch
             }), 429
         
         try:
-            log("=== Background Refresh Started ===", "WARN")
+            log("=== Background Refresh Started (cron) ===", "WARN")
             start_time = time.time()
-            
-            # Check if surveys are currently being loaded
-            if survey_service.is_loading():
-                log("Background refresh skipped: already loading", "WARN")
-                return jsonify({
-                    "status": "skipped",
-                    "reason": "Survey load already in progress"
-                }), 200
-            
-            # Get current state before refresh
-            old_surveys = survey_service.get_all_surveys()
-            old_count = len(old_surveys) if old_surveys else 0
-            old_ids = set(str(s['surveyId']) for s in old_surveys) if old_surveys else set()
-            
-            log(f"Current state: {old_count} surveys", "WARN")
-            
-            cache_mgr.on_data_refresh_start()
-            
-            survey_service.load_surveys(force_refresh=True)
-            
-            new_surveys = survey_service.get_all_surveys()
-            new_count = len(new_surveys)
-            new_ids = set(str(s['surveyId']) for s in new_surveys)
-            
-            added_ids = list(new_ids - old_ids)
-            removed_ids = list(old_ids - new_ids)
-            
-            log(f"New state: {new_count} surveys", "WARN")
-            log(f"Added: {len(added_ids)}, Removed: {len(removed_ids)}", "WARN")
-            
-            if new_surveys:
-                recent_ids = [str(s['surveyId']) for s in new_surveys[:recent_threshold]]
-                jazzhr_cache.set_recent_surveys(recent_ids)
-                log(f"Updated recent surveys cache with {len(recent_ids)} IDs", "WARN")
-            
-            cache_mgr.on_data_refresh_complete(
-                new_survey_count=len(added_ids),
-                new_survey_ids=added_ids
+
+            result = perform_survey_refresh(
+                survey_service, jazzhr_cache, background_checker, recent_threshold
             )
-            
-            if len(added_ids) > 0:
-                _store_notification_redis(jazzhr_cache, added_ids)
-            
-            if len(added_ids) > 0 or not cache_mgr.app_state.is_jazzhr_check_complete():
-                background_checker.start_checking()
-                log("Started background JazzHR checker", "WARN")
-            
+
             _last_refresh_time = time.time()
-            
             elapsed = time.time() - start_time
             log(f"=== Background Refresh Complete in {elapsed:.1f}s ===", "WARN")
-            
-            return jsonify({
-                "status": "success",
-                "old_count": old_count,
-                "new_count": new_count,
-                "added": len(added_ids),
-                "removed": len(removed_ids),
-                "added_ids": added_ids[:5],
-                "duration_seconds": round(elapsed, 2),
-                "timestamp": datetime.now().isoformat()
-            }), 200
-            
+
+            result["duration_seconds"] = round(elapsed, 2)
+            result["timestamp"] = datetime.now().isoformat()
+            return jsonify(result), 200
+
         except Exception as e:
             log(f"Background refresh error: {e}", "ERROR")
             import traceback
