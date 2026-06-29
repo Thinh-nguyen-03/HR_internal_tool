@@ -473,17 +473,29 @@ class SimpleJazzHRService:
         max_retries = UPLOAD_MAX_RETRIES
         delay_base = UPLOAD_RETRY_DELAY_BASE
         delay_max = UPLOAD_RETRY_DELAY_MAX
-        
+
+        # Fetch the real PDF via the authenticated Culture Index client. The
+        # public surveyReportUrl serves an HTML viewer SPA; only the portal
+        # report endpoint (reachable with our login session) returns the PDF.
+        try:
+            ci_client = survey_service._get_client()
+            pdf_bytes = ci_client.download_report_pdf(pdf_url)
+            log(f"Fetched real PDF for {survey_id}: {len(pdf_bytes)} bytes", "WARN")
+        except Exception as e:
+            log(f"Failed to fetch report PDF for {survey_id}: {e}", "ERROR")
+            return {'success': False, 'error': f"Could not fetch report PDF: {e}", 'survey_id': survey_id}
+
         for attempt in range(max_retries):
             try:
                 self._wait_for_rate_limit()
-                
+
                 result = checker.upload_file_to_applicant(
                     applicant_id=applicant_id,
                     pdf_url=pdf_url,
                     first_name=first_name,
                     last_name=last_name,
-                    verbose=True
+                    verbose=True,
+                    pdf_bytes=pdf_bytes,
                 )
                 
                 if result.get('success'):
