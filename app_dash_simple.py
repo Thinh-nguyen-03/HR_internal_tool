@@ -760,6 +760,12 @@ else:
 
 auth_manager = AuthManager(server, redis_client=redis_client)
 
+get_cache_manager().set_redis_client(redis_client)
+if redis_client:
+    log("AppState backed by Redis — signals shared across all workers", "WARN")
+else:
+    log("AppState using in-memory fallback — single worker only", "WARN")
+
 if not os.path.exists("assets"):
     os.makedirs("assets")
 
