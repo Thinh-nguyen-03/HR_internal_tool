@@ -401,36 +401,55 @@ class JazzHRUploadChecker:
         return None
     
     def upload_file_to_applicant(
-        self, 
-        applicant_id: str, 
-        pdf_url: str, 
-        first_name: str, 
+        self,
+        applicant_id: str,
+        pdf_url: str,
+        first_name: str,
         last_name: str,
-        verbose: bool = False
+        verbose: bool = False,
+        pdf_bytes: Optional[bytes] = None,
     ) -> Dict:
         import base64
-        
-        # SECURITY: Validate URL before downloading (SSRF protection)
-        is_safe, error_msg = is_safe_url(pdf_url, verbose=verbose)
-        if not is_safe:
-            error = f"Unsafe URL blocked: {error_msg}"
+
+        # The caller may pre-fetch the PDF via the authenticated Culture Index
+        # client (the public surveyReportUrl now serves an HTML viewer, not a
+        # PDF). If pdf_bytes is provided, use it and skip the unauthenticated
+        # download path entirely.
+        if pdf_bytes is not None:
+            pdf_content = pdf_bytes
             if verbose:
-                print(f"    [UPLOAD] {error}")
-            return {"success": False, "error": error}
-        
-        try:
-            if verbose:
-                print(f"    [UPLOAD] Downloading PDF from {pdf_url[:60]}...")
-            
-            resp = self.session.get(pdf_url, timeout=30)
-            resp.raise_for_status()
-            pdf_content = resp.content
-            
-            if verbose:
-                print(f"    [UPLOAD] Downloaded {len(pdf_content)} bytes")
-        except Exception as e:
-            return {"success": False, "error": f"Failed to download PDF: {e}"}
-        
+                print(f"    [UPLOAD] Using pre-fetched PDF ({len(pdf_content)} bytes)")
+            if pdf_content[:5] != b'%PDF-':
+                return {"success": False, "error": "Pre-fetched content is not a PDF"}
+        else:
+            # SECURITY: Validate URL before downloading (SSRF protection)
+            is_safe, error_msg = is_safe_url(pdf_url, verbose=verbose)
+            if not is_safe:
+                error = f"Unsafe URL blocked: {error_msg}"
+                if verbose:
+                    print(f"    [UPLOAD] {error}")
+                return {"success": False, "error": error}
+
+            try:
+                if verbose:
+                    print(f"    [UPLOAD] Downloading PDF from {pdf_url[:60]}...")
+
+                resp = self.session.get(pdf_url, timeout=30)
+                resp.raise_for_status()
+                pdf_content = resp.content
+
+                is_pdf = pdf_content[:5] == b'%PDF-'
+                if verbose:
+                    ctype = resp.headers.get('Content-Type', 'unknown')
+                    print(f"    [UPLOAD] Downloaded {len(pdf_content)} bytes, Content-Type={ctype}")
+                    print(f"    [UPLOAD] First 20 bytes: {pdf_content[:20]!r}  valid_pdf_header={is_pdf}")
+                if not is_pdf:
+                    snippet = pdf_content[:200].decode('utf-8', errors='replace')
+                    print(f"    [UPLOAD] NOT A PDF — content starts with: {snippet!r}")
+                    return {"success": False, "error": f"Downloaded content is not a PDF (got {len(pdf_content)} bytes, Content-Type={resp.headers.get('Content-Type','unknown')})"}
+            except Exception as e:
+                return {"success": False, "error": f"Failed to download PDF: {e}"}
+
         file_data = base64.b64encode(pdf_content).decode('utf-8')
         
         safe_first = ''.join(c for c in first_name if c.isalnum() or c in ' -_').strip().replace(' ', '_')
