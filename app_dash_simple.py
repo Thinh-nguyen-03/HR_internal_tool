@@ -48,6 +48,7 @@ UPLOAD_RETRY_DELAY_MAX = int(os.getenv('UPLOAD_RETRY_DELAY_MAX', '10'))
 POLL_INTERVAL_MS = int(os.getenv('POLL_INTERVAL_MS', '5000'))
 UPLOAD_INTERVAL_MS = int(os.getenv('UPLOAD_INTERVAL_MS', '1000'))
 PDF_FETCH_TIMEOUT = int(os.getenv('PDF_FETCH_TIMEOUT', '5'))
+DIAG_STATUS_CHECK = os.getenv('DIAG_STATUS_CHECK', '0') == '1'
 
 
 def log(message: str, level: str = "INFO") -> None:
@@ -333,12 +334,17 @@ class SimpleJazzHRService:
                 return result
             
             applicant_id = applicant.get('id')
-            log(f"[DEBUG] Applicant object for {first_name} {last_name}: {json.dumps(applicant)}", "WARN")
+            diag = DIAG_STATUS_CHECK
+            if diag:
+                log(f"[DIAG] === {first_name} {last_name} === applicant id={applicant_id} keys={list(applicant.keys())}", "WARN")
 
             self._wait_for_rate_limit()
-            files = checker.get_applicant_files(applicant_id, verbose=False)
-            
-            match = checker.check_pdf_match(pdf_url, pdf_size, files, first_name, last_name, verbose=False)
+            files = checker.get_applicant_files(applicant_id, verbose=diag)
+
+            match = checker.check_pdf_match(pdf_url, pdf_size, files, first_name, last_name, verbose=diag)
+            if diag:
+                ci_filename = pdf_url.split('/')[-1] if pdf_url else None
+                log(f"[DIAG] {first_name} {last_name}: CI filename={ci_filename} CI size={pdf_size} -> {len(files)} matched file(s) -> {match.get('matched_by') if match else 'NO MATCH'}", "WARN")
             
             if match:
                 result = {
