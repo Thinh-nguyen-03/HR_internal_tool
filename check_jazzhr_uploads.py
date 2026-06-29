@@ -441,20 +441,24 @@ class JazzHRUploadChecker:
             if not self.api_key:
                 return {"success": False, "error": "API key is None or empty in JazzHRUploadChecker"}
             
-            from urllib.parse import urlencode
-            qs = urlencode({
+            # apikey is read from the query string (global auth param); the
+            # endpoint params (applicant_id, filename, file_data, file_privacy)
+            # are read from the POST body as form fields.
+            url = f"{self.base_url}/files?apikey={self.api_key}"
+            payload = {
+                "apikey": self.api_key,
                 "applicant_id": applicant_id,
                 "filename": filename,
+                "file_data": file_data,
                 "file_privacy": "0",
-            })
-            url = f"{self.base_url}/files?apikey={self.api_key}&{qs}"
+            }
 
             if verbose:
                 print(f"    [UPLOAD] Uploading {filename} to applicant {applicant_id}...")
-                print(f"    [UPLOAD] URL: {self.base_url}/files?apikey=***&{qs}")
-                print(f"    [UPLOAD] Sending file_data in POST body ({len(file_data)} chars base64)")
+                print(f"    [UPLOAD] URL: {self.base_url}/files?apikey=***")
+                print(f"    [UPLOAD] Sending form body with keys: {list(payload.keys())} (file_data {len(file_data)} chars)")
 
-            resp = self.session.post(url, data={"file_data": file_data}, timeout=60)
+            resp = self.session.post(url, data=payload, timeout=60)
             resp.raise_for_status()
             
             result = resp.json()
