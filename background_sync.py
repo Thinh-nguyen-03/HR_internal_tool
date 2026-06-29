@@ -1,7 +1,7 @@
 import os
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from functools import wraps
 from flask import Blueprint, request, jsonify
 
@@ -9,6 +9,8 @@ from app_cache import get_cache_manager, log
 
 _last_refresh_time = 0
 _refresh_cooldown = 300
+
+_KNOWN_IDS_KEY = "known_survey_ids"
 
 
 def perform_survey_refresh(survey_service, jazzhr_cache, background_checker, recent_threshold):
@@ -27,32 +29,47 @@ def perform_survey_refresh(survey_service, jazzhr_cache, background_checker, rec
     old_surveys = survey_service.get_all_surveys()
     old_ids = set(str(s['surveyId']) for s in old_surveys) if old_surveys else set()
 
-    # Reload first, then decide whether anything actually changed. We only do the
-    # heavy reset (invalidate render cache, bump version, re-run JazzHR checks)
-    # when the survey set changed, so a frequent idle refresh is cheap and doesn't
-    # flicker the UI back into a "checking" state.
     survey_service.load_surveys(force_refresh=True)
 
     new_surveys = survey_service.get_all_surveys()
     new_ids = set(str(s['surveyId']) for s in new_surveys)
-    added_ids = list(new_ids - old_ids)
-    removed_ids = list(old_ids - new_ids)
 
-    log(f"Survey refresh: {len(old_ids)} -> {len(new_ids)} (added {len(added_ids)}, removed {len(removed_ids)})", "WARN")
+    # NEW-survey detection uses a PERSISTENT baseline in Redis, not the in-memory
+    # survey list. A fresh process (the hourly cron, or a cold start) has an empty
+    # in-memory list, so diffing against it would report every survey as "new".
+    # The Redis baseline survives restarts so "new" means genuinely-unseen IDs.
+    baseline = _get_known_ids(jazzhr_cache)
+    if baseline is None:
+        # Redis unavailable: fall back to the in-memory diff, but never treat a
+        # cold start (empty old_ids) as "everything is new".
+        truly_new = sorted(new_ids - old_ids) if old_ids else []
+    elif not baseline:
+        # No baseline recorded yet: establish it silently, don't notify.
+        truly_new = []
+    else:
+        truly_new = sorted(new_ids - baseline)
+    _set_known_ids(jazzhr_cache, new_ids)
+
+    removed_ids = list(old_ids - new_ids)
+    log(f"Survey refresh: in-mem {len(old_ids)} -> {len(new_ids)}; baseline-new={len(truly_new)}", "WARN")
 
     if new_surveys:
         recent_ids = [str(s['surveyId']) for s in new_surveys[:recent_threshold]]
         jazzhr_cache.set_recent_surveys(recent_ids)
 
-    changed = bool(added_ids or removed_ids)
+    if truly_new:
+        _store_notification_redis(jazzhr_cache, truly_new)
+
+    # Cache invalidation / re-check is driven by whether THIS process's view of the
+    # data changed (so the render cache and JazzHR re-check stay correct), separate
+    # from the notification baseline above.
+    changed = bool((new_ids - old_ids) or removed_ids)
     if changed:
         cache_mgr.on_data_refresh_start()
         cache_mgr.on_data_refresh_complete(
-            new_survey_count=len(added_ids),
-            new_survey_ids=added_ids
+            new_survey_count=len(truly_new),
+            new_survey_ids=truly_new
         )
-        if len(added_ids) > 0:
-            _store_notification_redis(jazzhr_cache, added_ids)
         background_checker.start_checking()
     elif not cache_mgr.app_state.is_jazzhr_check_complete():
         # No survey change, but the initial JazzHR pass never finished — run it.
@@ -62,10 +79,35 @@ def perform_survey_refresh(survey_service, jazzhr_cache, background_checker, rec
         "status": "success",
         "old_count": len(old_ids),
         "new_count": len(new_ids),
-        "added": len(added_ids),
+        "added": len(truly_new),
         "removed": len(removed_ids),
-        "added_ids": added_ids[:5],
+        "added_ids": truly_new[:5],
     }
+
+
+def _get_known_ids(jazzhr_cache):
+    """Return the persistent set of known survey IDs from Redis.
+
+    Returns a set() when no baseline exists yet (first run), or None when Redis
+    is unavailable (so the caller can fall back to the in-memory diff).
+    """
+    try:
+        if hasattr(jazzhr_cache.cache, '_redis') and jazzhr_cache.cache._redis:
+            data = jazzhr_cache.cache._redis.get(_KNOWN_IDS_KEY)
+            if data is None:
+                return set()
+            return set(json.loads(data))
+    except Exception as e:
+        log(f"Failed to read known survey IDs: {e}", "WARN")
+    return None
+
+
+def _set_known_ids(jazzhr_cache, ids):
+    try:
+        if hasattr(jazzhr_cache.cache, '_redis') and jazzhr_cache.cache._redis:
+            jazzhr_cache.cache._redis.set(_KNOWN_IDS_KEY, json.dumps(sorted(ids)))
+    except Exception as e:
+        log(f"Failed to store known survey IDs: {e}", "WARN")
 
 
 def create_background_sync_blueprint(survey_service, jazzhr_cache, background_checker, recent_threshold):
@@ -190,7 +232,7 @@ def _store_notification_redis(jazzhr_cache, added_ids):
             notification_data = {
                 "count": len(added_ids),
                 "survey_ids": added_ids[:10],
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "acknowledged": False
             }
             redis_client.setex(
