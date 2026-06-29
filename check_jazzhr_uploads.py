@@ -339,16 +339,31 @@ class JazzHRUploadChecker:
                 size_tolerance = max(2048, int(survey_pdf_size * 0.02))
                 if jazz_size == survey_pdf_size or size_diff <= size_tolerance:
                     size_match = True
-            
-            # STRICT MATCHING: Require BOTH name AND size match for confirmation
-            # Only exception: exact filename match (most reliable indicator)
+
+            # "CultureIndex" in the filename is this tool's own upload signature.
+            # Files are already pre-filtered to a single applicant, so a CI-report
+            # file on this person's profile IS their CI report. Do NOT require a
+            # size match: Culture Index regenerates report PDFs over time, so the
+            # size fetched today rarely equals the size stored at upload time.
+            jazz_normalized = jazz_lower.replace(' ', '').replace('_', '').replace('-', '')
+            is_ci_report_file = 'cultureindex' in jazz_normalized
+
             is_match = False
-            if match_type == 'exact_filename' and name_match:
-                # Exact filename match is highly reliable, size is optional but recommended
-                if size_match or not survey_pdf_size:
-                    is_match = True
+            if survey_id and survey_id in jazz_filename:
+                # Survey ID embedded in the JazzHR filename: most precise possible match
+                match_type = 'survey_id_in_filename'
+                is_match = True
+            elif match_type == 'exact_filename' and name_match:
+                # Exact filename match is highly reliable, size is optional
+                is_match = True
+            elif is_ci_report_file and name_match:
+                # CI-report file for this named person: filename signature is definitive
+                if not match_type:
+                    match_type = 'ci_report_name'
+                is_match = True
             elif match_type in ['uploaded_filename_pattern', 'full_name', 'name_pattern']:
-                # For other name matches, REQUIRE size verification to avoid false positives
+                # Generic name match on a non-CI file: keep size verification to
+                # avoid false positives (e.g. matching an unrelated resume)
                 if size_match and survey_pdf_size:
                     is_match = True
             elif size_match and survey_pdf_size:
