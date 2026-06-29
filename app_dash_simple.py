@@ -333,7 +333,8 @@ class SimpleJazzHRService:
                 return result
             
             applicant_id = applicant.get('id')
-            
+            log(f"[DEBUG] Applicant object for {first_name} {last_name}: {json.dumps(applicant)}", "WARN")
+
             self._wait_for_rate_limit()
             files = checker.get_applicant_files(applicant_id, verbose=False)
             
