@@ -6,6 +6,8 @@ from threading import RLock
 from typing import Dict, List, Optional, Any
 from urllib.parse import urlparse, urlunparse
 
+from app_cache import log
+
 CACHE_ENTRY_VERSION = 1
 
 def validate_cache_entry(entry: Dict) -> bool:
@@ -294,19 +296,31 @@ class RedisCache(CacheBackend):
         return self._connect()
     
     def _safe_operation(self, operation_name: str, operation, default=None):
-        """Execute Redis operation with graceful error handling (returns default on failure)."""
+        """Execute Redis operation with graceful error handling (returns default on failure).
+
+        Failures degrade gracefully to `default`, but they are no longer silent:
+        connection loss is logged once on the connected->disconnected transition,
+        and unexpected exceptions (which may be real bugs, not infra) are always
+        logged so they don't masquerade as cache misses.
+        """
         if not self._ensure_connected():
             return default
-        
+
         try:
             return operation()
         except self._redis_module.ConnectionError as e:
+            if self._is_connected:
+                log(f"Redis connection lost during '{operation_name}': {e}", "ERROR")
             self._is_connected = False
             self._last_error = str(e)
             return default
-        except self._redis_module.TimeoutError:
+        except self._redis_module.TimeoutError as e:
+            self._last_error = str(e)
+            log(f"Redis timeout during '{operation_name}'", "WARN")
             return default
-        except Exception:
+        except Exception as e:
+            self._last_error = str(e)
+            log(f"Unexpected Redis error during '{operation_name}': {e}", "ERROR")
             return default
     
     def _key(self, key: str) -> str:
