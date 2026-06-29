@@ -421,6 +421,7 @@ class SimpleJazzHRService:
         "invalid api key",
         "applicant_id was not set",
         "file already exists",
+        "invalid data",
     ]
     
     def _is_retryable_error(self, error_msg: str) -> bool:
@@ -437,7 +438,27 @@ class SimpleJazzHRService:
         checker = self._get_checker()
         first_name = survey.get('firstName', '').strip()
         last_name = survey.get('lastName', '').strip()
-        
+
+        redis_client = None
+        lock_key = None
+        if hasattr(self.cache.cache, '_redis') and self.cache.cache._redis:
+            redis_client = self.cache.cache._redis
+            lock_key = f"upload_lock:{survey_id}"
+            acquired = redis_client.set(lock_key, '1', nx=True, ex=60)
+            if not acquired:
+                log(f"Upload for {survey_id} skipped - another worker is already processing it", "WARN")
+                return {'success': False, 'error': 'Upload already in progress', 'survey_id': survey_id}
+
+        try:
+            return self._do_upload(survey_id, checker, first_name, last_name, pdf_url, applicant_id)
+        finally:
+            if redis_client and lock_key:
+                try:
+                    redis_client.delete(lock_key)
+                except Exception:
+                    pass
+
+    def _do_upload(self, survey_id: str, checker, first_name: str, last_name: str, pdf_url: str, applicant_id: str) -> Dict:
         last_error = None
         max_retries = UPLOAD_MAX_RETRIES
         delay_base = UPLOAD_RETRY_DELAY_BASE
