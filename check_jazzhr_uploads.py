@@ -428,19 +428,19 @@ class JazzHRUploadChecker:
             
             url = f"{self.base_url}/files?apikey={self.api_key}"
 
-            payload = {
-                "applicant_id": applicant_id,
-                "filename": filename,
-                "file_data": file_data,
-                "file_privacy": "0"
+            multipart = {
+                "applicant_id": (None, applicant_id),
+                "filename": (None, filename),
+                "file_data": (None, file_data),
+                "file_privacy": (None, "0"),
             }
 
             if verbose:
                 print(f"    [UPLOAD] Uploading {filename} to applicant {applicant_id}...")
                 print(f"    [UPLOAD] URL: {self.base_url}/files?apikey=***")
-                print(f"    [UPLOAD] Sending as form data with keys: {list(payload.keys())}")
+                print(f"    [UPLOAD] Sending as multipart/form-data with keys: {list(multipart.keys())}")
 
-            resp = self.session.post(url, data=payload, timeout=60)
+            resp = self.session.post(url, files=multipart, timeout=60)
             resp.raise_for_status()
             
             result = resp.json()
