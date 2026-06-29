@@ -3,7 +3,7 @@ import sys
 import time
 import json
 from datetime import datetime, timedelta
-from threading import RLock, Thread, Lock
+from threading import RLock, Thread, Lock, Event
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Tuple
 
@@ -26,7 +26,7 @@ from input_validation import sanitize_search_query, validate_survey_id, validate
 
 # New modular imports for cleaner architecture
 from app_cache import get_cache_manager, CacheManager
-from background_sync import create_background_sync_blueprint
+from background_sync import create_background_sync_blueprint, perform_survey_refresh
 from survey_display import (
     build_loading_result, build_error_result, 
     build_empty_result, build_notification_banner
@@ -49,6 +49,7 @@ POLL_INTERVAL_MS = int(os.getenv('POLL_INTERVAL_MS', '5000'))
 UPLOAD_INTERVAL_MS = int(os.getenv('UPLOAD_INTERVAL_MS', '1000'))
 PDF_FETCH_TIMEOUT = int(os.getenv('PDF_FETCH_TIMEOUT', '5'))
 DIAG_STATUS_CHECK = os.getenv('DIAG_STATUS_CHECK', '0') == '1'
+SURVEY_REFRESH_INTERVAL_MIN = int(os.getenv('SURVEY_REFRESH_INTERVAL_MIN', '10'))
 
 
 def log(message: str, level: str = "INFO") -> None:
@@ -720,6 +721,44 @@ class BackgroundJazzHRChecker:
                 else:
                     log(f"JazzHR Checker: Failed after {max_retries} attempts", "ERROR")
 
+
+class PeriodicRefresher:
+    """In-app timer that re-runs the survey refresh on a fixed interval, so new
+    Culture Index submissions surface within minutes instead of waiting for the
+    hourly cron. Uses the same perform_survey_refresh() core as the cron endpoint.
+    Safe with a single web worker; the daemon thread lives for the worker's life.
+    """
+    def __init__(self, survey_service, jazzhr_cache, background_checker, recent_threshold, interval_seconds):
+        self.survey_service = survey_service
+        self.jazzhr_cache = jazzhr_cache
+        self.background_checker = background_checker
+        self.recent_threshold = recent_threshold
+        self.interval = max(60, interval_seconds)
+        self._thread = None
+        self._stop = Event()
+
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = Thread(target=self._loop, daemon=True, name="PeriodicRefresher")
+        self._thread.start()
+        log(f"Periodic survey refresher started (every {self.interval}s)", "WARN")
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            self._stop.wait(self.interval)
+            if self._stop.is_set():
+                break
+            try:
+                perform_survey_refresh(
+                    self.survey_service, self.jazzhr_cache,
+                    self.background_checker, self.recent_threshold
+                )
+            except Exception as e:
+                log(f"Periodic refresh error: {e}", "ERROR")
+
+
 survey_service = SimpleSurveyService(client_id=CLIENT_ID, items_per_page=ITEMS_PER_PAGE)
 
 jazzhr_cache_backend = create_cache("jazzhr_status", ttl_hours=JAZZHR_CACHE_HOURS, cache_file="jazzhr_status_cache.json")
@@ -735,9 +774,16 @@ else:
 jazzhr_service = SimpleJazzHRService(api_key=jazzhr_api_key, cache=jazzhr_cache, max_workers=6)
 background_checker = BackgroundJazzHRChecker(survey_service, jazzhr_service, pdf_size_cache)
 
+periodic_refresher = PeriodicRefresher(
+    survey_service, jazzhr_cache, background_checker,
+    recent_threshold=RECENT_SURVEY_THRESHOLD,
+    interval_seconds=SURVEY_REFRESH_INTERVAL_MIN * 60,
+)
+periodic_refresher.start()
+
 log("App module loaded - surveys will load on first request", "WARN")
 
-app = Dash(__name__, suppress_callback_exceptions=True)
+app = Dash(__name__, suppress_callback_exceptions=True, update_title=None)
 app.title = "Culture Index - HR Tool"
 server = app.server
 
@@ -1037,9 +1083,9 @@ def serve_layout():
     dcc.Store(id="notification-data", data={"count": 0}),
     
     dcc.Interval(id="upload-interval", interval=UPLOAD_INTERVAL_MS, n_intervals=0, disabled=True),
-    dcc.Interval(id="background-signal-interval", interval=1000, n_intervals=0),
+    dcc.Interval(id="background-signal-interval", interval=3000, n_intervals=0),
     # Smart polling: Dash Interval auto-pauses when tab is inactive (browser optimization)
-    dcc.Interval(id="notification-check-interval", interval=10000, n_intervals=0),
+    dcc.Interval(id="notification-check-interval", interval=30000, n_intervals=0),
     ])
 
 app.layout = serve_layout
