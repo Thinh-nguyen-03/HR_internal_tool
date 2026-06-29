@@ -441,10 +441,12 @@ class JazzHRUploadChecker:
             if not self.api_key:
                 return {"success": False, "error": "API key is None or empty in JazzHRUploadChecker"}
             
-            # apikey is read from the query string (global auth param); the
-            # endpoint params (applicant_id, filename, file_data, file_privacy)
-            # are read from the POST body as form fields.
-            url = f"{self.base_url}/files?apikey={self.api_key}"
+            # The Resumator API parses ONLY a JSON body (Content-Type:
+            # application/json) for this endpoint. Confirmed via JazzHR's own
+            # Swagger "Try it out": all params (apikey, applicant_id, filename,
+            # file_data, file_privacy) go in the JSON body, with no query string.
+            # Form-encoded bodies are silently ignored by the API.
+            url = f"{self.base_url}/files"
             payload = {
                 "apikey": self.api_key,
                 "applicant_id": applicant_id,
@@ -455,10 +457,10 @@ class JazzHRUploadChecker:
 
             if verbose:
                 print(f"    [UPLOAD] Uploading {filename} to applicant {applicant_id}...")
-                print(f"    [UPLOAD] URL: {self.base_url}/files?apikey=***")
-                print(f"    [UPLOAD] Sending form body with keys: {list(payload.keys())} (file_data {len(file_data)} chars)")
+                print(f"    [UPLOAD] URL: {url}")
+                print(f"    [UPLOAD] Sending JSON body with keys: {list(payload.keys())} (file_data {len(file_data)} chars)")
 
-            resp = self.session.post(url, data=payload, timeout=60)
+            resp = self.session.post(url, json=payload, timeout=60)
             resp.raise_for_status()
             
             result = resp.json()
