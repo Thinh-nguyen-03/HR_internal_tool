@@ -297,11 +297,12 @@ class SimpleJazzHRService:
         with self._lock:
             self._call_times.append(datetime.now())
     
-    def check_one_survey(self, survey: Dict, pdf_url: str, pdf_size: Optional[int]) -> Dict:
+    def check_one_survey(self, survey: Dict, pdf_url: str, pdf_size: Optional[int], force_diag: bool = False) -> Dict:
         survey_id = str(survey.get('surveyId', ''))
-        
+        diag = DIAG_STATUS_CHECK or force_diag
+
         cached = self.cache.get(survey_id)
-        if cached:
+        if cached and not force_diag:
             if cached.get('status') == 'NO_PDF_URL' and pdf_url:
                 pass
             elif cached.get('status') == 'NOT_UPLOADED' and pdf_size and not cached.get('had_pdf_size'):
@@ -326,15 +327,16 @@ class SimpleJazzHRService:
             checker = self._get_checker()
             
             self._wait_for_rate_limit()
-            applicant = checker.search_applicant_by_name(first_name, last_name, verbose=False)
-            
+            applicant = checker.search_applicant_by_name(first_name, last_name, verbose=diag)
+
             if not applicant:
+                if diag:
+                    log(f"[DIAG] === {first_name} {last_name} === NO applicant returned by search -> NOT_IN_JAZZHR", "WARN")
                 result = {"status": "NOT_IN_JAZZHR", "isUploaded": False, "timestamp": datetime.now().isoformat()}
                 self.cache.set(survey_id, result)
                 return result
-            
+
             applicant_id = applicant.get('id')
-            diag = DIAG_STATUS_CHECK
             if diag:
                 log(f"[DIAG] === {first_name} {last_name} === applicant id={applicant_id} keys={list(applicant.keys())}", "WARN")
 
@@ -385,26 +387,26 @@ class SimpleJazzHRService:
             log(f"JazzHR error for {survey_id}: {e}", "ERROR")
             return {"status": "ERROR", "isUploaded": False, "error": str(e), "timestamp": datetime.now().isoformat()}
     
-    def check_surveys_batch(self, surveys: List[Dict], urls: Dict[str, str], pdf_sizes: Dict[str, int]) -> Dict[str, Dict]:
+    def check_surveys_batch(self, surveys: List[Dict], urls: Dict[str, str], pdf_sizes: Dict[str, int], force_diag: bool = False) -> Dict[str, Dict]:
         results = {}
         to_check = []
-        
+
         for survey in surveys:
             survey_id = str(survey.get('surveyId', ''))
             cached = self.cache.get(survey_id)
-            if cached:
+            if cached and not force_diag:
                 results[survey_id] = cached
             else:
                 to_check.append(survey)
-        
+
         if not to_check:
             return results
-        
+
         def check_one(survey):
             survey_id = str(survey.get('surveyId', ''))
             url = urls.get(survey_id)
             size = pdf_sizes.get(survey_id)
-            return survey_id, self.check_one_survey(survey, url, size)
+            return survey_id, self.check_one_survey(survey, url, size, force_diag=force_diag)
         
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             futures = {executor.submit(check_one, s): s for s in to_check}
@@ -1522,7 +1524,7 @@ def handle_refresh_single(n_clicks_list, button_ids, current_trigger, surveys_da
                         else:
                             pdf_sizes = {}
                         
-                        jazzhr_service.check_surveys_batch([survey], {survey_id: pdf_url}, pdf_sizes)
+                        jazzhr_service.check_surveys_batch([survey], {survey_id: pdf_url}, pdf_sizes, force_diag=True)
                         log(f"Completed individual check for survey {survey_id}", "WARN")
                         
                         cache_mgr = get_cache_manager()
