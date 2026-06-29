@@ -439,9 +439,9 @@ class JazzHRUploadChecker:
             if verbose:
                 print(f"    [UPLOAD] Uploading {filename} to applicant {applicant_id}...")
                 print(f"    [UPLOAD] URL: {url}")
-                print(f"    [UPLOAD] Sending as JSON with keys: {list(payload.keys())}")
-            
-            resp = self.session.post(url, json=payload, timeout=60)
+                print(f"    [UPLOAD] Sending as form data with keys: {list(payload.keys())}")
+
+            resp = self.session.post(url, data=payload, timeout=60)
             resp.raise_for_status()
             
             result = resp.json()
