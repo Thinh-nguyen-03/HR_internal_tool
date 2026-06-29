@@ -6,6 +6,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
+from urllib.parse import urlparse, quote
 
 import requests
 from requests.adapters import HTTPAdapter, Retry
@@ -154,6 +155,43 @@ class CultureIndexClient:
             "login_time": datetime.now(timezone.utc).isoformat(),
         }
     
+    def download_report_pdf(self, survey_report_url: str, timeout: int = 30) -> bytes:
+        """Download the real report PDF for a survey.
+
+        The CSV export's surveyReportUrl
+        (https://surveys.cultureindex.com/r/<token>/<file>.pdf) now serves an
+        HTML viewer SPA, not a PDF. The actual PDF is served by the authenticated
+        portal endpoint
+        (https://portal.cultureindex.com/api/reports/survey/<token>/<file>.pdf?version=1),
+        which redirects through an /authorize step that this logged-in session
+        (bearer token + login cookies) can satisfy. Returns the raw PDF bytes.
+        """
+        if not self.token:
+            raise CultureIndexAuthError("Not authenticated. Call login() first.")
+
+        parsed = urlparse(survey_report_url)
+        parts = [p for p in parsed.path.split('/') if p]
+        # Expected viewer path: /r/<token>/<filename>
+        if len(parts) < 3 or parts[0] != 'r':
+            raise ValueError(f"Unexpected survey report URL format: {survey_report_url}")
+        token, filename = parts[1], parts[2]
+
+        pdf_url = f"{self.config.base_url}/api/reports/survey/{token}/{quote(filename)}?version=1"
+        response = self.session.get(pdf_url, timeout=timeout, allow_redirects=True)
+
+        if response.status_code == 401:
+            raise CultureIndexAuthError("Token expired or invalid")
+        response.raise_for_status()
+
+        content = response.content
+        if content[:5] != b'%PDF-':
+            ctype = response.headers.get('Content-Type', 'unknown')
+            raise ValueError(
+                f"Report endpoint did not return a PDF "
+                f"(Content-Type={ctype}, {len(content)} bytes) for {pdf_url}"
+            )
+        return content
+
     def get(self, endpoint: str, **kwargs) -> dict[str, Any]:
         """Make authenticated GET request to Culture Index API."""
         if not self.token:
