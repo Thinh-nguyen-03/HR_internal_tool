@@ -454,8 +454,9 @@ class JazzHRUploadChecker:
                     return {"success": False, "error": result}
                 return {"success": True, "message": result, "filename": filename}
             
-            if isinstance(result, dict) and "error" in result:
-                return {"success": False, "error": result.get("error", str(result))}
+            if isinstance(result, dict) and ("error" in result or "_error" in result):
+                error_msg = result.get("error") or result.get("_error", str(result))
+                return {"success": False, "error": error_msg}
             
             return {
                 "success": True, 
