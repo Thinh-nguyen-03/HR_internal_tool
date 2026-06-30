@@ -2052,3 +2052,4 @@ def process_upload_queue(n_intervals, queue, results, refresh_trigger):
 if __name__ == "__main__":
     log("Starting Dash app on port 8051...", "WARN")
     app.run(debug=False, port=8051)
+
