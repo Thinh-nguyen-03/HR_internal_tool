@@ -482,8 +482,9 @@ body {
 
 .survey-footer {
     display: flex;
-    justify-content: space-between;
     align-items: center;
+    justify-content: flex-start;
+    gap: 10px;
     padding-top: 12px;
     padding-right: 120px;
     border-top: 1px solid rgba(255, 255, 255, 0.05);
@@ -495,17 +496,23 @@ body {
     font-weight: 500;
     font-style: italic;
     opacity: 0.8;
+    margin-right: auto;
 }
 
 .refresh-single-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 32px;
     background-color: rgba(249, 168, 37, 0.1);
     color: var(--brand-yellow);
     border: 1px solid rgba(249, 168, 37, 0.3);
-    padding: 6px 16px;
+    padding: 0 16px;
     border-radius: var(--radius-sm);
     cursor: pointer;
     font-size: 13px;
     font-weight: 500;
+    line-height: 1;
     transition: all 0.2s ease;
     font-family: 'Inter', sans-serif;
 }
@@ -527,12 +534,13 @@ body {
     flex: 0 1 auto;
     min-width: 0;
     max-width: 360px;
-    margin: 0 12px;
-    padding: 4px 9px;
+    height: 32px;
+    margin: 0;
+    padding: 0 10px;
     border-radius: var(--radius-sm);
     font-size: 0.76rem;
     font-weight: 600;
-    line-height: 1.2;
+    line-height: 1;
 }
 
 .card-action-status--refreshing,
