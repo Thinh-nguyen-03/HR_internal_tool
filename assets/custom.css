@@ -146,6 +146,20 @@ body {
     height: 100%;
 }
 
+#surveys-loading {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+#surveys-loading > div {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+
 /* Surveys Header */
 .surveys-header {
     padding: 12px 20px;
@@ -260,6 +274,7 @@ body {
 /* Surveys List */
 .surveys-list {
     flex: 1;
+    min-height: 0;
     overflow-y: auto;
     padding: 20px 30px;
 }
