@@ -25,18 +25,36 @@
     padding: 0;
 }
 
+html {
+    min-height: 100%;
+    height: auto;
+    overflow-y: auto !important;
+    overflow-x: hidden;
+}
+
 body {
     font-family: 'Inter', sans-serif;
     background-color: var(--brand-navy);
     color: var(--text-primary);
-    height: 100vh;
-    overflow: hidden;
+    min-height: 100vh;
+    height: auto !important;
+    overflow-y: auto !important;
+    overflow-x: hidden;
+}
+
+#react-entry-point,
+#_dash-app-content {
+    min-height: 100vh;
+    height: auto !important;
+    overflow: visible !important;
 }
 
 .app-container {
     display: flex;
     flex-direction: column;
-    height: 100vh;
+    min-height: 100vh;
+    height: auto !important;
+    overflow: visible !important;
 }
 
 /* Header */
@@ -123,8 +141,9 @@ body {
 /* Main Content */
 .main-content {
     padding: 20px;
-    height: calc(100vh - var(--header-height));
-    overflow: hidden;
+    min-height: calc(100vh - var(--header-height));
+    height: auto !important;
+    overflow: visible !important;
     display: flex;
     flex-direction: column;
 }
@@ -136,14 +155,14 @@ body {
     border: 1px solid var(--border-color);
     display: flex;
     flex-direction: column;
-    overflow: hidden;
+    overflow: visible !important;
     flex: 1;
     min-height: 0;
 }
 
 .surveys-panel.full-width {
     width: 100%;
-    height: 100%;
+    min-height: 100%;
 }
 
 #surveys-loading {
@@ -275,7 +294,7 @@ body {
 .surveys-list {
     flex: 1;
     min-height: 0;
-    overflow-y: auto;
+    overflow: visible !important;
     padding: 20px 30px;
 }
 
