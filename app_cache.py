@@ -312,6 +312,11 @@ class CacheManager:
         self.app_state.request_ui_signal()
         self.app_state.increment_version()
         log("Cache manager: JazzHR checks complete, UI signal requested", "WARN")
+
+    def on_jazzhr_status_update(self) -> None:
+        self.app_state.request_ui_signal()
+        self.app_state.increment_version()
+        log("Cache manager: JazzHR status updated, UI signal requested", "WARN")
     
     def on_logout(self) -> None:
         self.session_cache.invalidate_session()
@@ -369,5 +374,3 @@ cache_manager = CacheManager()
 
 def get_cache_manager() -> CacheManager:
     return cache_manager
-
-
