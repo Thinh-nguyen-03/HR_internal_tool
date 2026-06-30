@@ -1284,9 +1284,9 @@ def _card_action_states(current_state, entries):
 
 def _upload_result_card_entry(survey_id, result):
     if result.get("success"):
-        return (survey_id, "success", "Upload successful", None)
-    error = result.get("error") or "Upload failed"
-    return (survey_id, "error", "Upload failed", error)
+        return (survey_id, "success", "Uploaded", None)
+    error = result.get("error") or "Failed"
+    return (survey_id, "error", "Failed", error)
 
 @callback(
     [Output("surveys-container", "children"),
@@ -1692,7 +1692,7 @@ def show_refresh_single_card_status(n_clicks_list, button_ids, surveys_data, car
             card_action_state,
             survey_id,
             "error",
-            "Survey data not found",
+            "Not Found",
             f"Unable to check survey {survey_id}"
         )
     
@@ -1701,7 +1701,7 @@ def show_refresh_single_card_status(n_clicks_list, button_ids, surveys_data, car
         card_action_state,
         survey_id,
         "refreshing",
-        "Checking JazzHR status",
+        "Checking",
         full_name
     )
 
@@ -1710,11 +1710,11 @@ def _jazzhr_status_label(result):
     if (result or {}).get("isUploaded") or status == "UPLOADED":
         return "Uploaded"
     if status == "NOT_UPLOADED":
-        return "Not uploaded"
+        return "Not Uploaded"
     if status == "NOT_IN_JAZZHR":
-        return "Not in JazzHR"
+        return "Not In JazzHR"
     if status == "MISSING_NAME":
-        return "Missing name"
+        return "Missing Name"
     if status == "NO_PDF_URL":
         return "No PDF URL"
     if status == "ERROR":
@@ -1787,14 +1787,14 @@ def finalize_refreshing_card_actions(background_signal, card_action_state):
         if result.get("status") == "ERROR":
             updated_state[str(survey_id)] = {
                 "kind": "error",
-                "message": "Status check failed",
+                "message": "Failed",
                 "detail": result.get("error", "Unable to check JazzHR"),
                 "timestamp": datetime.now().isoformat()
             }
         else:
             updated_state[str(survey_id)] = {
                 "kind": "success",
-                "message": "Status refreshed",
+                "message": "Refreshed",
                 "detail": _jazzhr_status_label(result),
                 "timestamp": datetime.now().isoformat()
             }
@@ -2098,7 +2098,7 @@ def show_upload_selected_card_status(n_clicks, checkbox_values, surveys_data, ex
         survey_data = next((s for s in (surveys_data or []) if s["surveyId"] == survey_id), None)
         if survey_data and survey_data.get("applicantId") and survey_data.get("pdf_url"):
             full_name = f"{survey_data.get('firstName', '')} {survey_data.get('lastName', '')}".strip()
-            card_entries.append((str(survey_id), "queued", "Queued for upload", full_name))
+            card_entries.append((str(survey_id), "queued", "Queued", full_name))
     
     if not card_entries:
         return dash.no_update
@@ -2194,14 +2194,14 @@ def show_single_upload_card_status(n_clicks_list, surveys_data, existing_queue, 
         return dash.no_update
     
     if existing_queue:
-        return _card_action_state(card_action_state, survey_id, "queued", "Upload waiting", "Another upload is in progress")
+        return _card_action_state(card_action_state, survey_id, "queued", "Waiting", "Upload in progress")
     
     survey_data = next((s for s in (surveys_data or []) if str(s.get("surveyId")) == survey_id), None)
     if not survey_data or not survey_data.get("applicantId") or not survey_data.get("pdf_url"):
-        return _card_action_state(card_action_state, survey_id, "error", "Upload unavailable", "Survey data not found")
+        return _card_action_state(card_action_state, survey_id, "error", "Unavailable", "Survey data not found")
     
     name = f"{survey_data.get('firstName', '')} {survey_data.get('lastName', '')}".strip()
-    return _card_action_state(card_action_state, survey_id, "uploading", "Uploading to JazzHR", name)
+    return _card_action_state(card_action_state, survey_id, "uploading", "Uploading", name)
 
 @callback(
     [Output("upload-queue", "data", allow_duplicate=True),
@@ -2328,9 +2328,9 @@ def show_upload_card_progress(queue, results, card_action_state):
             continue
         name = f"{item.get('firstName', '')} {item.get('lastName', '')}".strip()
         if index == 0:
-            card_entries.append((survey_id, "uploading", "Uploading to JazzHR", name))
+            card_entries.append((survey_id, "uploading", "Uploading", name))
         else:
-            card_entries.append((survey_id, "queued", "Queued for upload", name))
+            card_entries.append((survey_id, "queued", "Queued", name))
     
     if not card_entries:
         return dash.no_update
