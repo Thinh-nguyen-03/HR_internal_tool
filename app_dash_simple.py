@@ -2181,6 +2181,10 @@ def show_single_upload_card_status(n_clicks_list, surveys_data, existing_queue, 
     trigger_prop_id = triggered[0].get("prop_id", "")
     if ".n_clicks" not in trigger_prop_id:
         return dash.no_update
+
+    triggered_value = triggered[0].get("value")
+    if not triggered_value or triggered_value <= 0:
+        return dash.no_update
     
     try:
         prop_id_without_suffix = trigger_prop_id.replace(".n_clicks", "")
