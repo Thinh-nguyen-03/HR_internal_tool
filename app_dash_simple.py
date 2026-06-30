@@ -1568,15 +1568,14 @@ _individual_refresh_lock = RLock()
 
 @callback(
     [Output("refresh-trigger", "data", allow_duplicate=True),
-     Output("card-action-state", "data", allow_duplicate=True)],
+     Output("upload-status", "children", allow_duplicate=True)],
     Input({"type": "refresh-single-btn", "index": ALL}, "n_clicks"),
     [State({"type": "refresh-single-btn", "index": ALL}, "id"),
      State("refresh-trigger", "data"),
-     State("current-surveys-data", "data"),
-     State("card-action-state", "data")],
+     State("current-surveys-data", "data")],
     prevent_initial_call=True
 )
-def handle_refresh_single(n_clicks_list, button_ids, current_trigger, surveys_data, card_action_state):
+def handle_refresh_single(n_clicks_list, button_ids, current_trigger, surveys_data):
     ctx = dash.callback_context
     if not ctx.triggered:
         return dash.no_update, dash.no_update
@@ -1649,27 +1648,59 @@ def handle_refresh_single(n_clicks_list, button_ids, current_trigger, surveys_da
                 
                 Thread(target=check_single, daemon=True).start()
                 
-                full_name = f"{first_name} {last_name}".strip() or f"survey {survey_id}"
-                return dash.no_update, _card_action_state(
-                    card_action_state,
-                    survey_id,
-                    "refreshing",
-                    "Checking JazzHR status",
-                    full_name
-                )
+                return dash.no_update, dash.no_update
             else:
                 log(f"Survey {survey_id} not found in current page data", "WARN")
-                return dash.no_update, _card_action_state(
-                    card_action_state,
-                    survey_id,
-                    "error",
-                    "Survey data not found",
-                    f"Unable to check survey {survey_id}"
-                )
+                return dash.no_update, dash.no_update
     except Exception as e:
         log(f"Error in individual refresh: {e}", "ERROR")
     
     return dash.no_update, dash.no_update
+
+@callback(
+    Output("card-action-state", "data", allow_duplicate=True),
+    Input({"type": "refresh-single-btn", "index": ALL}, "n_clicks"),
+    [State({"type": "refresh-single-btn", "index": ALL}, "id"),
+     State("current-surveys-data", "data"),
+     State("card-action-state", "data")],
+    prevent_initial_call=True
+)
+def show_refresh_single_card_status(n_clicks_list, button_ids, surveys_data, card_action_state):
+    ctx = dash.callback_context
+    if not ctx.triggered:
+        return dash.no_update
+    
+    triggered_prop = ctx.triggered[0]["prop_id"]
+    triggered_value = ctx.triggered[0].get("value")
+    
+    if ".n_clicks" not in triggered_prop or not triggered_value:
+        return dash.no_update
+    
+    try:
+        triggered_id_str = triggered_prop.split(".")[0]
+        button_id = json.loads(triggered_id_str)
+        survey_id = str(button_id.get("index"))
+    except Exception:
+        return dash.no_update
+    
+    survey = next((s for s in (surveys_data or []) if str(s.get("surveyId")) == survey_id), None)
+    if not survey:
+        return _card_action_state(
+            card_action_state,
+            survey_id,
+            "error",
+            "Survey data not found",
+            f"Unable to check survey {survey_id}"
+        )
+    
+    full_name = f"{survey.get('firstName', '')} {survey.get('lastName', '')}".strip() or f"survey {survey_id}"
+    return _card_action_state(
+        card_action_state,
+        survey_id,
+        "refreshing",
+        "Checking JazzHR status",
+        full_name
+    )
 
 def _jazzhr_status_label(result):
     status = (result or {}).get("status")
@@ -1999,33 +2030,31 @@ def update_selection_count(checkbox_values):
     [Output("upload-queue", "data", allow_duplicate=True),
      Output("upload-results", "data", allow_duplicate=True),
      Output("upload-interval", "disabled", allow_duplicate=True),
-     Output("upload-status", "children", allow_duplicate=True),
-     Output("card-action-state", "data", allow_duplicate=True)],
+     Output("upload-status", "children", allow_duplicate=True)],
     Input("upload-btn", "n_clicks"),
     [State({"type": "survey-checkbox", "index": ALL}, "value"),
      State("current-surveys-data", "data"),
-     State("upload-queue", "data"),
-     State("card-action-state", "data")],
+     State("upload-queue", "data")],
     prevent_initial_call=True
 )
-def handle_upload_selected(n_clicks, checkbox_values, surveys_data, existing_queue, card_action_state):
+def handle_upload_selected(n_clicks, checkbox_values, surveys_data, existing_queue):
     global _active_uploads, _completed_uploads
     
     if not n_clicks or existing_queue:
-        return dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update
+        return dash.no_update, dash.no_update, dash.no_update, dash.no_update
     
     selected_ids = [v[0] for v in checkbox_values if v]
     
     if not selected_ids:
-        return [], {}, True, "", dash.no_update
+        return [], {}, True, ""
     
     if len(selected_ids) > MAX_BATCH_UPLOAD:
-        return [], {}, True, f"Max {MAX_BATCH_UPLOAD} at a time", dash.no_update
+        return [], {}, True, f"Max {MAX_BATCH_UPLOAD} at a time"
     
     with _active_uploads_lock:
         conflicting = [sid for sid in selected_ids if str(sid) in _active_uploads or str(sid) in _completed_uploads]
         if conflicting:
-            return dash.no_update, dash.no_update, dash.no_update, "Some surveys already uploading", dash.no_update
+            return dash.no_update, dash.no_update, dash.no_update, "Some surveys already uploading"
     
     queue = []
     for survey_id in selected_ids:
@@ -2040,75 +2069,87 @@ def handle_upload_selected(n_clicks, checkbox_values, surveys_data, existing_que
             })
     
     if not queue:
-        return [], {}, True, "No uploadable surveys", dash.no_update
+        return [], {}, True, "No uploadable surveys"
     
-    card_entries = [
-        (
-            item["survey_id"],
-            "queued",
-            "Queued for upload",
-            f"{item.get('firstName', '')} {item.get('lastName', '')}".strip()
-        )
-        for item in queue
-    ]
-    return queue, {}, False, f"Uploading 0/{len(queue)}", _card_action_states(card_action_state, card_entries)
+    return queue, {}, False, f"Uploading 0/{len(queue)}"
+
+@callback(
+    Output("card-action-state", "data", allow_duplicate=True),
+    Input("upload-btn", "n_clicks"),
+    [State({"type": "survey-checkbox", "index": ALL}, "value"),
+     State("current-surveys-data", "data"),
+     State("upload-queue", "data"),
+     State("card-action-state", "data")],
+    prevent_initial_call=True
+)
+def show_upload_selected_card_status(n_clicks, checkbox_values, surveys_data, existing_queue, card_action_state):
+    if not n_clicks or existing_queue:
+        return dash.no_update
+    
+    selected_ids = [v[0] for v in (checkbox_values or []) if v]
+    if not selected_ids or len(selected_ids) > MAX_BATCH_UPLOAD:
+        return dash.no_update
+    
+    card_entries = []
+    for survey_id in selected_ids:
+        survey_data = next((s for s in (surveys_data or []) if s["surveyId"] == survey_id), None)
+        if survey_data and survey_data.get("applicantId") and survey_data.get("pdf_url"):
+            full_name = f"{survey_data.get('firstName', '')} {survey_data.get('lastName', '')}".strip()
+            card_entries.append((str(survey_id), "queued", "Queued for upload", full_name))
+    
+    if not card_entries:
+        return dash.no_update
+    
+    return _card_action_states(card_action_state, card_entries)
 
 @callback(
     [Output("upload-queue", "data", allow_duplicate=True),
      Output("upload-results", "data", allow_duplicate=True),
      Output("upload-interval", "disabled", allow_duplicate=True),
-     Output("upload-status", "children", allow_duplicate=True),
-     Output("card-action-state", "data", allow_duplicate=True)],
+     Output("upload-status", "children", allow_duplicate=True)],
     Input({"type": "upload-single-btn", "index": ALL}, "n_clicks"),
     [State("current-surveys-data", "data"),
-     State("upload-queue", "data"),
-     State("card-action-state", "data")],
+     State("upload-queue", "data")],
     prevent_initial_call=True
 )
-def handle_single_upload(n_clicks_list, surveys_data, existing_queue, card_action_state):
+def handle_single_upload(n_clicks_list, surveys_data, existing_queue):
     global _active_uploads, _completed_uploads
     
     triggered = ctx.triggered
     if not triggered or not triggered[0]:
-        return dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update
+        return dash.no_update, dash.no_update, dash.no_update, dash.no_update
     
     trigger_prop_id = triggered[0].get("prop_id", "")
     if ".n_clicks" not in trigger_prop_id:
-        return dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update
+        return dash.no_update, dash.no_update, dash.no_update, dash.no_update
     
     if existing_queue:
-        return dash.no_update, dash.no_update, dash.no_update, "Upload in progress", dash.no_update
+        return dash.no_update, dash.no_update, dash.no_update, "Upload in progress"
     
     try:
         prop_id_without_suffix = trigger_prop_id.replace(".n_clicks", "")
         triggered_id_dict = json.loads(prop_id_without_suffix)
         survey_id = str(triggered_id_dict.get("index"))
     except:
-        return dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update
+        return dash.no_update, dash.no_update, dash.no_update, dash.no_update
     
     if not survey_id:
-        return dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update
+        return dash.no_update, dash.no_update, dash.no_update, dash.no_update
     
     has_click = any(c and c > 0 for c in (n_clicks_list or []))
     if not has_click:
-        return dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update
+        return dash.no_update, dash.no_update, dash.no_update, dash.no_update
     
     with _active_uploads_lock:
         if survey_id in _active_uploads or survey_id in _completed_uploads:
             log(f"Blocked duplicate upload for {survey_id}", "WARN")
-            return dash.no_update, dash.no_update, dash.no_update, "Upload already in progress", dash.no_update
+            return dash.no_update, dash.no_update, dash.no_update, "Upload already in progress"
     
     log(f"Queueing upload for {survey_id}", "WARN")
     
     survey_data = next((s for s in surveys_data if str(s.get("surveyId")) == survey_id), None)
     if not survey_data or not survey_data.get("applicantId") or not survey_data.get("pdf_url"):
-        return (
-            dash.no_update,
-            dash.no_update,
-            dash.no_update,
-            "Survey data not found",
-            _card_action_state(card_action_state, survey_id, "error", "Upload unavailable", "Survey data not found")
-        )
+        return dash.no_update, dash.no_update, dash.no_update, "Survey data not found"
     
     queue = [{
         "survey_id": survey_id,
@@ -2119,27 +2160,59 @@ def handle_single_upload(n_clicks_list, surveys_data, existing_queue, card_actio
     }]
     
     name = f"{survey_data.get('firstName', '')} {survey_data.get('lastName', '')}".strip()
-    return queue, {}, False, f"Uploading {name}", _card_action_state(card_action_state, survey_id, "uploading", "Uploading to JazzHR", name)
+    return queue, {}, False, f"Uploading {name}"
+
+@callback(
+    Output("card-action-state", "data", allow_duplicate=True),
+    Input({"type": "upload-single-btn", "index": ALL}, "n_clicks"),
+    [State("current-surveys-data", "data"),
+     State("upload-queue", "data"),
+     State("card-action-state", "data")],
+    prevent_initial_call=True
+)
+def show_single_upload_card_status(n_clicks_list, surveys_data, existing_queue, card_action_state):
+    triggered = ctx.triggered
+    if not triggered or not triggered[0]:
+        return dash.no_update
+    
+    trigger_prop_id = triggered[0].get("prop_id", "")
+    if ".n_clicks" not in trigger_prop_id:
+        return dash.no_update
+    
+    try:
+        prop_id_without_suffix = trigger_prop_id.replace(".n_clicks", "")
+        triggered_id_dict = json.loads(prop_id_without_suffix)
+        survey_id = str(triggered_id_dict.get("index"))
+    except Exception:
+        return dash.no_update
+    
+    if existing_queue:
+        return _card_action_state(card_action_state, survey_id, "queued", "Upload waiting", "Another upload is in progress")
+    
+    survey_data = next((s for s in (surveys_data or []) if str(s.get("surveyId")) == survey_id), None)
+    if not survey_data or not survey_data.get("applicantId") or not survey_data.get("pdf_url"):
+        return _card_action_state(card_action_state, survey_id, "error", "Upload unavailable", "Survey data not found")
+    
+    name = f"{survey_data.get('firstName', '')} {survey_data.get('lastName', '')}".strip()
+    return _card_action_state(card_action_state, survey_id, "uploading", "Uploading to JazzHR", name)
 
 @callback(
     [Output("upload-queue", "data", allow_duplicate=True),
      Output("upload-results", "data", allow_duplicate=True),
      Output("upload-interval", "disabled", allow_duplicate=True),
      Output("upload-status", "children", allow_duplicate=True),
-     Output("refresh-trigger", "data", allow_duplicate=True),
-     Output("card-action-state", "data", allow_duplicate=True)],
+     Output("refresh-trigger", "data", allow_duplicate=True)],
     Input("upload-interval", "n_intervals"),
     [State("upload-queue", "data"),
      State("upload-results", "data"),
-     State("refresh-trigger", "data"),
-     State("card-action-state", "data")],
+     State("refresh-trigger", "data")],
     prevent_initial_call=True
 )
-def process_upload_queue(n_intervals, queue, results, refresh_trigger, card_action_state):
+def process_upload_queue(n_intervals, queue, results, refresh_trigger):
     global _active_uploads, _completed_uploads
     
     if n_intervals is None or n_intervals <= 1:
-        return dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update
+        return dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update
     
     if not queue:
         if results:
@@ -2152,12 +2225,8 @@ def process_upload_queue(n_intervals, queue, results, refresh_trigger, card_acti
             msg = f"Done: {success_count} uploaded"
             if fail_count > 0:
                 msg += f", {fail_count} failed"
-            card_entries = [
-                _upload_result_card_entry(survey_id, result)
-                for survey_id, result in results.items()
-            ]
-            return [], results, True, msg, refresh_trigger + 1, _card_action_states(card_action_state, card_entries)
-        return [], results, True, "", dash.no_update, dash.no_update
+            return [], results, True, msg, refresh_trigger + 1
+        return [], results, True, "", dash.no_update
     
     current = queue[0]
     remaining = queue[1:]
@@ -2178,22 +2247,13 @@ def process_upload_queue(n_intervals, queue, results, refresh_trigger, card_acti
                     msg += f", {fail_count} failed"
                 _active_uploads.clear()
                 _completed_uploads.clear()
-                card_entries = [
-                    _upload_result_card_entry(result_sid, result_value)
-                    for result_sid, result_value in results.items()
-                ]
-                return remaining, results, True, msg, refresh_trigger + 1, _card_action_states(card_action_state, card_entries)
+                return remaining, results, True, msg, refresh_trigger + 1
             
-            return remaining, results, False, f"Processing {len(results)}/{len(results)+len(remaining)}", dash.no_update, _card_action_state(
-                card_action_state,
-                survey_id,
-                "uploading",
-                "Uploading to JazzHR"
-            )
+            return remaining, results, False, f"Processing {len(results)}/{len(results)+len(remaining)}", dash.no_update
         
         if survey_id in _active_uploads:
             log(f"Skipping {survey_id} - actively processing", "WARN")
-            return dash.no_update, dash.no_update, dash.no_update, "Processing", dash.no_update, dash.no_update
+            return dash.no_update, dash.no_update, dash.no_update, "Processing", dash.no_update
         
         _active_uploads.add(survey_id)
     
@@ -2236,18 +2296,39 @@ def process_upload_queue(n_intervals, queue, results, refresh_trigger, card_acti
     completed = len(results)
     total = completed + len(remaining)
     
-    return (
-        remaining,
-        results,
-        False,
-        f"Uploading {completed}/{total}",
-        dash.no_update,
-        _card_action_state(
-            card_action_state,
-            survey_id,
-            *_upload_result_card_entry(survey_id, result)[1:]
-        )
-    )
+    return remaining, results, False, f"Uploading {completed}/{total}", dash.no_update
+
+@callback(
+    Output("card-action-state", "data", allow_duplicate=True),
+    [Input("upload-queue", "data"),
+     Input("upload-results", "data")],
+    State("card-action-state", "data"),
+    prevent_initial_call=True
+)
+def show_upload_card_progress(queue, results, card_action_state):
+    if not queue and not results:
+        return dash.no_update
+    
+    results = results or {}
+    card_entries = []
+    
+    for survey_id, result in results.items():
+        card_entries.append(_upload_result_card_entry(survey_id, result))
+    
+    for index, item in enumerate(queue or []):
+        survey_id = str(item.get("survey_id"))
+        if survey_id in results:
+            continue
+        name = f"{item.get('firstName', '')} {item.get('lastName', '')}".strip()
+        if index == 0:
+            card_entries.append((survey_id, "uploading", "Uploading to JazzHR", name))
+        else:
+            card_entries.append((survey_id, "queued", "Queued for upload", name))
+    
+    if not card_entries:
+        return dash.no_update
+    
+    return _card_action_states(card_action_state, card_entries)
 
 if __name__ == "__main__":
     log("Starting Dash app on port 8051...", "WARN")
