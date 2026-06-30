@@ -1321,6 +1321,9 @@ def display_surveys(page, search_query, refresh_trigger, background_signal):
     except (AttributeError, RuntimeError):
         triggered_id = None
     
+    if triggered_id == "background-check-signal":
+        return (dash.no_update,) * 9
+    
     is_refresh_trigger = (triggered_id == "refresh-trigger")
     
     # Check cache (session-based, respects JazzHR check completion)
@@ -2225,7 +2228,7 @@ def process_upload_queue(n_intervals, queue, results, refresh_trigger):
             msg = f"Done: {success_count} uploaded"
             if fail_count > 0:
                 msg += f", {fail_count} failed"
-            return [], results, True, msg, refresh_trigger + 1
+            return [], results, True, msg, dash.no_update
         return [], results, True, "", dash.no_update
     
     current = queue[0]
@@ -2247,7 +2250,7 @@ def process_upload_queue(n_intervals, queue, results, refresh_trigger):
                     msg += f", {fail_count} failed"
                 _active_uploads.clear()
                 _completed_uploads.clear()
-                return remaining, results, True, msg, refresh_trigger + 1
+                return remaining, results, True, msg, dash.no_update
             
             return remaining, results, False, f"Processing {len(results)}/{len(results)+len(remaining)}", dash.no_update
         
