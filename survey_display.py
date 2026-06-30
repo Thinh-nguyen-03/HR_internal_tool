@@ -34,7 +34,7 @@ def format_time_ago(timestamp_str: str) -> str:
 def build_status_indicator(status: Optional[str], is_uploaded: bool) -> html.Div:
     if status is None:
         return html.Div(
-            [html.Span("Checking...", className="status-text")],
+            [html.Span("Checking", className="status-text")],
             className="status-pending"
         )
     elif is_uploaded:
@@ -195,13 +195,13 @@ def build_survey_display(
     return survey_items, uploadable_ids, surveys_data
 
 
-def build_loading_result(message: str = "Loading surveys...") -> Tuple:
+def build_loading_result(message: str = "Loading surveys") -> Tuple:
     return (
         [html.Div(message, className="empty-message")],
-        "Loading...",
+        "Loading",
         True,  # prev disabled
         True,  # next disabled
-        "Loading data...",
+        "Loading data",
         [],    # surveys_data
         [],    # uploadable_ids
         {"display": "block"},  # loading indicator
