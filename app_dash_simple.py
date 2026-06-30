@@ -1368,7 +1368,7 @@ def display_surveys(page, search_query, refresh_trigger, background_signal):
                         urls_to_check = {sid: url for sid, url in urls_uncached.items() if url}
                         pdf_sizes_uncached = fetch_pdf_sizes(urls_to_check, pdf_size_cache)
                         jazzhr_service.check_surveys_batch(uncached_surveys, urls_uncached, pdf_sizes_uncached)
-                        cache_mgr.app_state.request_ui_signal()
+                        cache_mgr.on_jazzhr_status_update()
                     except Exception as e:
                         log(f"Error checking uncached surveys: {e}", "ERROR")
                 
@@ -1597,7 +1597,7 @@ def handle_refresh_single(n_clicks_list, button_ids, current_trigger, surveys_da
                         log(f"Completed individual check for survey {survey_id}", "WARN")
                         
                         cache_mgr = get_cache_manager()
-                        cache_mgr.app_state.request_ui_signal()
+                        cache_mgr.on_jazzhr_status_update()
                     except Exception as e:
                         log(f"Error checking survey {survey_id}: {e}", "ERROR")
                 
@@ -2052,4 +2052,3 @@ def process_upload_queue(n_intervals, queue, results, refresh_trigger):
 if __name__ == "__main__":
     log("Starting Dash app on port 8051...", "WARN")
     app.run(debug=False, port=8051)
-
