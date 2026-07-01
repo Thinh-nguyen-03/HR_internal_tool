@@ -2302,6 +2302,19 @@ def process_upload_queue(n_intervals, queue, results, refresh_trigger):
     
     completed = len(results)
     total = completed + len(remaining)
+
+    if not remaining:
+        with _active_uploads_lock:
+            _active_uploads.clear()
+            _completed_uploads.clear()
+
+        success_count = sum(1 for r in results.values() if r.get("success"))
+        fail_count = len(results) - success_count
+        msg = f"Done: {success_count} uploaded"
+        if fail_count > 0:
+            msg += f", {fail_count} failed"
+
+        return remaining, results, True, msg, dash.no_update
     
     return remaining, results, False, f"Uploading {completed}/{total}", dash.no_update
 
