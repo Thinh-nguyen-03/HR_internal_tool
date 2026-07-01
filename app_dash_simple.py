@@ -1288,6 +1288,19 @@ def _upload_result_card_entry(survey_id, result):
     error = result.get("error") or "Failed"
     return (survey_id, "error", "Failed", error)
 
+def _clear_stale_upload_states(current_state, active_ids, result_ids):
+    state = dict(current_state or {})
+    active_ids = {str(sid) for sid in active_ids}
+    result_ids = {str(sid) for sid in result_ids}
+
+    for survey_id, entry in list(state.items()):
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("kind") in {"queued", "uploading"} and survey_id not in active_ids and survey_id not in result_ids:
+            del state[survey_id]
+
+    return state
+
 @callback(
     [Output("surveys-container", "children"),
      Output("page-info", "children"),
@@ -2194,7 +2207,7 @@ def show_single_upload_card_status(n_clicks_list, surveys_data, existing_queue, 
         return dash.no_update
     
     if existing_queue:
-        return _card_action_state(card_action_state, survey_id, "queued", "Waiting", "Upload in progress")
+        return dash.no_update
     
     survey_data = next((s for s in (surveys_data or []) if str(s.get("surveyId")) == survey_id), None)
     if not survey_data or not survey_data.get("applicantId") or not survey_data.get("pdf_url"):
@@ -2327,10 +2340,13 @@ def process_upload_queue(n_intervals, queue, results, refresh_trigger):
 )
 def show_upload_card_progress(queue, results, card_action_state):
     if not queue and not results:
-        return dash.no_update
+        cleared_state = _clear_stale_upload_states(card_action_state, set(), set())
+        return cleared_state if cleared_state != (card_action_state or {}) else dash.no_update
     
     results = results or {}
     card_entries = []
+    active_ids = {str(item.get("survey_id")) for item in (queue or [])}
+    result_ids = {str(survey_id) for survey_id in results.keys()}
     
     for survey_id, result in results.items():
         card_entries.append(_upload_result_card_entry(survey_id, result))
@@ -2346,9 +2362,11 @@ def show_upload_card_progress(queue, results, card_action_state):
             card_entries.append((survey_id, "queued", "Queued", name))
     
     if not card_entries:
-        return dash.no_update
+        cleared_state = _clear_stale_upload_states(card_action_state, active_ids, result_ids)
+        return cleared_state if cleared_state != (card_action_state or {}) else dash.no_update
     
-    return _card_action_states(card_action_state, card_entries)
+    cleaned_state = _clear_stale_upload_states(card_action_state, active_ids, result_ids)
+    return _card_action_states(cleaned_state, card_entries)
 
 if __name__ == "__main__":
     log("Starting Dash app on port 8051...", "WARN")
