@@ -171,10 +171,16 @@ class CultureIndexClient:
 
         parsed = urlparse(survey_report_url)
         parts = [p for p in parsed.path.split('/') if p]
-        # Expected viewer path: /r/<token>/<filename>
-        if len(parts) < 3 or parts[0] != 'r':
+
+        # Supported shapes:
+        # - Viewer URL from CSV: /r/<token>/<filename>
+        # - Portal PDF URL:      /api/reports/survey/<token>/<filename>
+        if len(parts) >= 3 and parts[0] == 'r':
+            token, filename = parts[1], parts[2]
+        elif len(parts) >= 5 and parts[:3] == ['api', 'reports', 'survey']:
+            token, filename = parts[3], parts[4]
+        else:
             raise ValueError(f"Unexpected survey report URL format: {survey_report_url}")
-        token, filename = parts[1], parts[2]
 
         pdf_url = f"{self.config.base_url}/api/reports/survey/{token}/{quote(filename)}?version=1"
         response = self.session.get(pdf_url, timeout=timeout, allow_redirects=True)
