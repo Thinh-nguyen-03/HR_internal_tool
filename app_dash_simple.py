@@ -1170,24 +1170,7 @@ def build_survey_display_local(surveys: List[Dict], jazzhr_results: Dict, pdf_si
             "pdf_url": url
         })
         
-        if status is None:
-            status_indicator = html.Div([html.Span("Checking", className="status-text")], className="status-pending")
-        elif is_uploaded:
-            status_indicator = html.Div([html.Span("Uploaded", className="status-text")], className="status-uploaded")
-        elif status == "NOT_UPLOADED":
-            status_indicator = html.Div([html.Span("Not Uploaded", className="status-text")], className="status-missing")
-        elif status == "NOT_IN_JAZZHR":
-            status_indicator = html.Div([html.Span("Not in Jazz", className="status-text")], className="status-not-found")
-        elif status == "MISSING_NAME":
-            status_indicator = html.Div([html.Span("No Name", className="status-text")], className="status-pending")
-        elif status == "NO_PDF_URL":
-            status_indicator = html.Div([html.Span("No URL", className="status-text")], className="status-pending")
-        elif status == "ERROR":
-            status_indicator = html.Div([html.Span("Error", className="status-text")], className="status-error")
-        else:
-            status_indicator = html.Div([html.Span("Unknown", className="status-text")], className="status-pending")
-
-        status_indicator.id = {"type": "survey-status-indicator", "index": survey_id}
+        status_indicator = _status_indicator_component(jazzhr, survey_id)
         
         pdf_size_mb = pdf_size / (1024 * 1024) if pdf_size else None
         full_name = f"{s.get('firstName', '')} {s.get('lastName', '')}".strip() or "Unknown"
@@ -1257,6 +1240,34 @@ def build_survey_display_local(surveys: List[Dict], jazzhr_results: Dict, pdf_si
 _active_uploads = set()
 _active_uploads_lock = Lock()
 _completed_uploads = {}
+
+def _status_indicator_parts(jazzhr_result: Dict) -> Tuple[List, str]:
+    status = (jazzhr_result or {}).get('status')
+    is_uploaded = (jazzhr_result or {}).get('isUploaded', False)
+
+    if status is None:
+        return [html.Span("Checking", className="status-text")], "status-pending"
+    if is_uploaded or status == "UPLOADED":
+        return [html.Span("Uploaded", className="status-text")], "status-uploaded"
+    if status == "NOT_UPLOADED":
+        return [html.Span("Not Uploaded", className="status-text")], "status-missing"
+    if status == "NOT_IN_JAZZHR":
+        return [html.Span("Not in Jazz", className="status-text")], "status-not-found"
+    if status == "MISSING_NAME":
+        return [html.Span("No Name", className="status-text")], "status-pending"
+    if status == "NO_PDF_URL":
+        return [html.Span("No URL", className="status-text")], "status-pending"
+    if status == "ERROR":
+        return [html.Span("Error", className="status-text")], "status-error"
+    return [html.Span("Unknown", className="status-text")], "status-pending"
+
+def _status_indicator_component(jazzhr_result: Dict, survey_id: str):
+    children, class_name = _status_indicator_parts(jazzhr_result)
+    return html.Div(
+        children,
+        id={"type": "survey-status-indicator", "index": survey_id},
+        className=class_name
+    )
 
 def _card_action_state(current_state, survey_id, kind, message, detail=None):
     state = dict(current_state or {})
@@ -2373,29 +2384,44 @@ def show_upload_card_progress(queue, results, card_action_state):
 @callback(
     [Output({"type": "survey-status-indicator", "index": ALL}, "children"),
      Output({"type": "survey-status-indicator", "index": ALL}, "className")],
-    Input("upload-results", "data"),
-    State({"type": "survey-status-indicator", "index": ALL}, "id"),
+    [Input("upload-results", "data"),
+     Input("background-check-signal", "data")],
+    [State({"type": "survey-status-indicator", "index": ALL}, "id"),
+     State({"type": "survey-status-indicator", "index": ALL}, "children"),
+     State({"type": "survey-status-indicator", "index": ALL}, "className")],
     prevent_initial_call=True
 )
-def update_status_indicator_after_upload(results, status_ids):
-    if not results or not status_ids:
+def update_status_indicator_after_events(upload_results, background_signal, status_ids, current_children, current_classes):
+    if not status_ids:
         return dash.no_update, dash.no_update
 
     children = []
     classes = []
     changed = False
+    upload_results = upload_results or {}
+    current_children = current_children or [dash.no_update] * len(status_ids)
+    current_classes = current_classes or [dash.no_update] * len(status_ids)
 
-    for status_id in status_ids:
+    for idx, status_id in enumerate(status_ids):
         survey_id = str(status_id.get("index"))
-        result = results.get(survey_id)
+        upload_result = upload_results.get(survey_id)
 
-        if result and result.get("success"):
+        if upload_result and upload_result.get("success"):
             children.append([html.Span("Uploaded", className="status-text")])
             classes.append("status-uploaded")
             changed = True
-        else:
-            children.append(dash.no_update)
-            classes.append(dash.no_update)
+            continue
+
+        cached_status = jazzhr_cache.get(survey_id)
+        if cached_status:
+            next_children, next_class = _status_indicator_parts(cached_status)
+            children.append(next_children)
+            classes.append(next_class)
+            changed = True
+            continue
+
+        children.append(current_children[idx] if idx < len(current_children) else dash.no_update)
+        classes.append(current_classes[idx] if idx < len(current_classes) else dash.no_update)
 
     if not changed:
         return dash.no_update, dash.no_update
