@@ -1186,6 +1186,8 @@ def build_survey_display_local(surveys: List[Dict], jazzhr_results: Dict, pdf_si
             status_indicator = html.Div([html.Span("Error", className="status-text")], className="status-error")
         else:
             status_indicator = html.Div([html.Span("Unknown", className="status-text")], className="status-pending")
+
+        status_indicator.id = {"type": "survey-status-indicator", "index": survey_id}
         
         pdf_size_mb = pdf_size / (1024 * 1024) if pdf_size else None
         full_name = f"{s.get('firstName', '')} {s.get('lastName', '')}".strip() or "Unknown"
@@ -1245,7 +1247,7 @@ def build_survey_display_local(surveys: List[Dict], jazzhr_results: Dict, pdf_si
             card_children.append(
                 html.Div([
                     html.Button("Upload", id={"type": "upload-single-btn", "index": survey_id}, n_clicks=0, className="upload-single-btn")
-                ], className="survey-upload-container")
+                ], id={"type": "survey-upload-container", "index": survey_id}, className="survey-upload-container")
             )
         
         survey_items.append(html.Div(card_children, className="survey-item"))
@@ -2367,6 +2369,63 @@ def show_upload_card_progress(queue, results, card_action_state):
     
     cleaned_state = _clear_stale_upload_states(card_action_state, active_ids, result_ids)
     return _card_action_states(cleaned_state, card_entries)
+
+@callback(
+    [Output({"type": "survey-status-indicator", "index": ALL}, "children"),
+     Output({"type": "survey-status-indicator", "index": ALL}, "className")],
+    Input("upload-results", "data"),
+    State({"type": "survey-status-indicator", "index": ALL}, "id"),
+    prevent_initial_call=True
+)
+def update_status_indicator_after_upload(results, status_ids):
+    if not results or not status_ids:
+        return dash.no_update, dash.no_update
+
+    children = []
+    classes = []
+    changed = False
+
+    for status_id in status_ids:
+        survey_id = str(status_id.get("index"))
+        result = results.get(survey_id)
+
+        if result and result.get("success"):
+            children.append([html.Span("Uploaded", className="status-text")])
+            classes.append("status-uploaded")
+            changed = True
+        else:
+            children.append(dash.no_update)
+            classes.append(dash.no_update)
+
+    if not changed:
+        return dash.no_update, dash.no_update
+
+    return children, classes
+
+@callback(
+    Output({"type": "survey-upload-container", "index": ALL}, "style"),
+    Input("upload-results", "data"),
+    State({"type": "survey-upload-container", "index": ALL}, "id"),
+    prevent_initial_call=True
+)
+def hide_upload_button_after_success(results, upload_container_ids):
+    if not results or not upload_container_ids:
+        return dash.no_update
+
+    styles = []
+    changed = False
+
+    for container_id in upload_container_ids:
+        survey_id = str(container_id.get("index"))
+        result = results.get(survey_id)
+
+        if result and result.get("success"):
+            styles.append({"display": "none"})
+            changed = True
+        else:
+            styles.append(dash.no_update)
+
+    return styles if changed else dash.no_update
 
 if __name__ == "__main__":
     log("Starting Dash app on port 8051...", "WARN")
