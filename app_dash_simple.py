@@ -47,6 +47,7 @@ JAZZHR_CACHE_HOURS = int(os.getenv('JAZZHR_CACHE_HOURS', '2'))
 UPLOAD_MAX_RETRIES = int(os.getenv('UPLOAD_MAX_RETRIES', '3'))
 UPLOAD_RETRY_DELAY_BASE = int(os.getenv('UPLOAD_RETRY_DELAY_BASE', '2'))
 UPLOAD_RETRY_DELAY_MAX = int(os.getenv('UPLOAD_RETRY_DELAY_MAX', '10'))
+COMPLETED_UPLOAD_GUARD_SECONDS = int(os.getenv('COMPLETED_UPLOAD_GUARD_SECONDS', '120'))
 
 POLL_INTERVAL_MS = int(os.getenv('POLL_INTERVAL_MS', '5000'))
 UPLOAD_INTERVAL_MS = int(os.getenv('UPLOAD_INTERVAL_MS', '1000'))
@@ -1241,6 +1242,29 @@ _active_uploads = set()
 _active_uploads_lock = Lock()
 _completed_uploads = {}
 
+def _prune_completed_uploads_locked():
+    now = time.monotonic()
+    for survey_id, entry in list(_completed_uploads.items()):
+        if not isinstance(entry, dict) or "completed_at" not in entry:
+            continue
+        if now - entry["completed_at"] > COMPLETED_UPLOAD_GUARD_SECONDS:
+            del _completed_uploads[survey_id]
+
+def _remember_completed_upload_locked(survey_id, result):
+    _completed_uploads[str(survey_id)] = {
+        "result": result,
+        "completed_at": time.monotonic(),
+    }
+
+def _get_completed_upload_locked(survey_id):
+    _prune_completed_uploads_locked()
+    entry = _completed_uploads.get(str(survey_id))
+    if not entry:
+        return None
+    if isinstance(entry, dict) and "result" in entry:
+        return entry["result"]
+    return entry
+
 def _status_indicator_parts(jazzhr_result: Dict) -> Tuple[List, str]:
     status = (jazzhr_result or {}).get('status')
     is_uploaded = (jazzhr_result or {}).get('isUploaded', False)
@@ -2081,7 +2105,10 @@ def handle_upload_selected(n_clicks, checkbox_values, surveys_data, existing_que
         return [], {}, True, f"Max {MAX_BATCH_UPLOAD} at a time"
     
     with _active_uploads_lock:
-        conflicting = [sid for sid in selected_ids if str(sid) in _active_uploads or str(sid) in _completed_uploads]
+        conflicting = [
+            sid for sid in selected_ids
+            if str(sid) in _active_uploads or _get_completed_upload_locked(sid)
+        ]
         if conflicting:
             return dash.no_update, dash.no_update, dash.no_update, "Some surveys already uploading"
     
@@ -2170,7 +2197,7 @@ def handle_single_upload(n_clicks_list, surveys_data, existing_queue):
         return dash.no_update, dash.no_update, dash.no_update, dash.no_update
     
     with _active_uploads_lock:
-        if survey_id in _active_uploads or survey_id in _completed_uploads:
+        if survey_id in _active_uploads or _get_completed_upload_locked(survey_id):
             log(f"Blocked duplicate upload for {survey_id}", "WARN")
             return dash.no_update, dash.no_update, dash.no_update, "Upload already in progress"
     
@@ -2251,7 +2278,7 @@ def process_upload_queue(n_intervals, queue, results, refresh_trigger):
         if results:
             with _active_uploads_lock:
                 _active_uploads.clear()
-                _completed_uploads.clear()
+                _prune_completed_uploads_locked()
             
             success_count = sum(1 for r in results.values() if r.get("success"))
             fail_count = len(results) - success_count
@@ -2266,9 +2293,10 @@ def process_upload_queue(n_intervals, queue, results, refresh_trigger):
     survey_id = str(current["survey_id"])
     
     with _active_uploads_lock:
-        if survey_id in _completed_uploads:
+        completed_result = _get_completed_upload_locked(survey_id)
+        if completed_result:
             log(f"Skipping {survey_id} - already completed globally", "WARN")
-            result = _completed_uploads[survey_id]
+            result = completed_result
             if survey_id not in results:
                 results[survey_id] = result
             
@@ -2279,7 +2307,7 @@ def process_upload_queue(n_intervals, queue, results, refresh_trigger):
                 if fail_count > 0:
                     msg += f", {fail_count} failed"
                 _active_uploads.clear()
-                _completed_uploads.clear()
+                _prune_completed_uploads_locked()
                 return remaining, results, True, msg, dash.no_update
             
             return remaining, results, False, f"Processing {len(results)}/{len(results)+len(remaining)}", dash.no_update
@@ -2310,7 +2338,7 @@ def process_upload_queue(n_intervals, queue, results, refresh_trigger):
             log(f"Upload failed: {survey_id} - {result.get('error')}", "ERROR")
         
         with _active_uploads_lock:
-            _completed_uploads[survey_id] = result
+            _remember_completed_upload_locked(survey_id, result)
             _active_uploads.discard(survey_id)
         
         results[survey_id] = result
@@ -2321,7 +2349,7 @@ def process_upload_queue(n_intervals, queue, results, refresh_trigger):
         result = {"success": False, "error": str(e)}
         
         with _active_uploads_lock:
-            _completed_uploads[survey_id] = result
+            _remember_completed_upload_locked(survey_id, result)
             _active_uploads.discard(survey_id)
         
         results[survey_id] = result
@@ -2332,7 +2360,7 @@ def process_upload_queue(n_intervals, queue, results, refresh_trigger):
     if not remaining:
         with _active_uploads_lock:
             _active_uploads.clear()
-            _completed_uploads.clear()
+            _prune_completed_uploads_locked()
 
         success_count = sum(1 for r in results.values() if r.get("success"))
         fail_count = len(results) - success_count
@@ -2393,7 +2421,7 @@ def show_upload_card_progress(queue, results, card_action_state):
 )
 def update_status_indicator_after_events(upload_results, background_signal, status_ids, current_children, current_classes):
     if not status_ids:
-        return dash.no_update, dash.no_update
+        return [], []
 
     children = []
     classes = []
@@ -2424,7 +2452,7 @@ def update_status_indicator_after_events(upload_results, background_signal, stat
         classes.append(current_classes[idx] if idx < len(current_classes) else dash.no_update)
 
     if not changed:
-        return dash.no_update, dash.no_update
+        return current_children, current_classes
 
     return children, classes
 
@@ -2435,8 +2463,12 @@ def update_status_indicator_after_events(upload_results, background_signal, stat
     prevent_initial_call=True
 )
 def hide_upload_button_after_success(results, upload_container_ids):
-    if not results or not upload_container_ids:
-        return dash.no_update
+    if not upload_container_ids:
+        return []
+
+    unchanged_styles = [dash.no_update for _ in upload_container_ids]
+    if not results:
+        return unchanged_styles
 
     styles = []
     changed = False
@@ -2451,7 +2483,7 @@ def hide_upload_button_after_success(results, upload_container_ids):
         else:
             styles.append(dash.no_update)
 
-    return styles if changed else dash.no_update
+    return styles if changed else unchanged_styles
 
 if __name__ == "__main__":
     log("Starting Dash app on port 8051...", "WARN")
