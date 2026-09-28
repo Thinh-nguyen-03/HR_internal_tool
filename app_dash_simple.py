@@ -183,6 +183,8 @@ class SnapshotWatcher:
         self._wake.set()
 
     def start(self) -> None:
+        self._wake = Event()
+        self._tick_lock = Lock()
         self._thread = Thread(target=self._loop, daemon=True, name="SnapshotWatcher")
         self._thread.start()
 
@@ -190,7 +192,8 @@ class SnapshotWatcher:
         return bool(self._thread and self._thread.is_alive())
 
     def ensure_running(self) -> None:
-        """Restart the watcher thread if it has died."""
+        """Restart the watcher thread if it has died after starting in this process."""
+        ensure_background_threads()
         if not self.is_alive():
             log("Snapshot watcher was not running; restarting it", "ERROR")
             self.start()
@@ -274,7 +277,26 @@ class SnapshotWatcher:
 
 
 snapshot_watcher = SnapshotWatcher()
-snapshot_watcher.start()
+
+_background_lock = Lock()
+_background_pid: Optional[int] = None
+
+
+def ensure_background_threads() -> None:
+    """Start the status and snapshot threads once per process, in the process
+    that handles requests. Starting them at import breaks under gunicorn
+    --preload: the import runs in the parent, the worker is a fork of it, and
+    threads don't survive the fork."""
+    global _background_pid
+    if _background_pid == os.getpid():
+        return
+    with _background_lock:
+        if _background_pid == os.getpid():
+            return
+        status_worker.start()
+        snapshot_watcher.start()
+        _background_pid = os.getpid()
+        log(f"Background threads started in process {os.getpid()}", "WARN")
 
 app = Dash(__name__, suppress_callback_exceptions=True, update_title=None)
 app.title = "Culture Index - HR Tool"
@@ -341,6 +363,12 @@ PUBLIC_PATH_PREFIXES = (
     '/assets/', '/_dash-component-suites/',
     '/_dash-layout', '/_dash-dependencies', '/_reload-hash', '/_favicon.ico',
 )
+
+
+@server.before_request
+def start_background_threads():
+    ensure_background_threads()
+    return None
 
 
 @server.before_request

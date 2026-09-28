@@ -51,6 +51,10 @@ class StatusWorker:
             api_key, before_request=lambda: rate_limiter.wait(limit=background_calls_per_minute)
         )
 
+        self._foreground_threads = foreground_threads
+        self._reset_queue()
+
+    def _reset_queue(self) -> None:
         self._cond = Condition()
         self._fg_heap: List = []
         self._bg_heap: List = []
@@ -60,7 +64,15 @@ class StatusWorker:
         self._in_flight: Set[str] = set()
         self._errors: Dict[str, str] = {}       # survey_id -> last check error (not cached in Redis)
 
-        for i in range(foreground_threads):
+    def start(self) -> None:
+        """Start the worker threads in the calling process with a fresh queue.
+
+        Called from the process that serves requests, not at import: under
+        gunicorn --preload the app is imported in the parent and copied into the
+        worker by fork, and threads do not survive a fork.
+        """
+        self._reset_queue()
+        for i in range(self._foreground_threads):
             Thread(target=self._run, args=(False,), daemon=True, name=f"StatusFG{i}").start()
         Thread(target=self._run, args=(True,), daemon=True, name="StatusBG").start()
 
