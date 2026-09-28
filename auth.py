@@ -2,11 +2,12 @@ import os
 import time
 import secrets
 from datetime import timedelta
-from typing import Optional, Dict
-from functools import wraps
+from typing import Dict
 
-from flask import session, redirect, request
-from flask_login import LoginManager, UserMixin, login_user, logout_user, current_user
+from flask import session
+from flask_login import LoginManager, UserMixin, login_user, logout_user
+
+from shared_state import key as redis_key
 
 
 class User(UserMixin):
@@ -60,48 +61,35 @@ class AuthManager:
             print("ERROR: APP_USERNAME or APP_PASSWORD not set in environment")
             return False
         
-        username_match = secrets.compare_digest(username, expected_username)
-        password_match = secrets.compare_digest(password, expected_password)
+        username_match = secrets.compare_digest(username.encode(), expected_username.encode())
+        password_match = secrets.compare_digest(password.encode(), expected_password.encode())
         
         return username_match and password_match
     
-    def is_rate_limited(self, username: str) -> bool:
-        """Check if user is rate limited (works across multiple workers with Redis)."""
-        # Use Redis for distributed rate limiting if available
+    def _failed_attempt_count(self, username: str) -> int:
+        """Failed attempts inside the lockout window (Redis when available, so all workers agree)."""
         if self.redis:
             try:
-                key = f"login_attempts:{username}"
-                attempts = self.redis.llen(key)
-                if attempts >= self.max_attempts:
-                    return True
-                return False
+                return self.redis.llen(redis_key(f"login_attempts:{username}"))
             except Exception as e:
                 print(f"Redis rate limit check failed, falling back to in-memory: {e}")
-                # Fall through to in-memory check
-        
-        # Fallback to in-memory (for development/single worker)
+
         current_time = time.time()
-        
-        if username not in self.login_attempts:
-            return False
-        
-        # Remove attempts outside lockout window
         self.login_attempts[username] = [
-            attempt_time for attempt_time in self.login_attempts[username]
+            attempt_time for attempt_time in self.login_attempts.get(username, [])
             if current_time - attempt_time < self.lockout_duration
         ]
-        
-        if len(self.login_attempts[username]) >= self.max_attempts:
-            return True
-        
-        return False
+        return len(self.login_attempts[username])
+
+    def is_rate_limited(self, username: str) -> bool:
+        return self._failed_attempt_count(username) >= self.max_attempts
     
     def record_failed_attempt(self, username: str) -> None:
         """Record a failed login attempt (persists across workers with Redis)."""
         # Use Redis for distributed tracking if available
         if self.redis:
             try:
-                key = f"login_attempts:{username}"
+                key = redis_key(f"login_attempts:{username}")
                 self.redis.rpush(key, time.time())
                 self.redis.expire(key, self.lockout_duration)
                 return
@@ -119,7 +107,7 @@ class AuthManager:
         # Clear from Redis if available
         if self.redis:
             try:
-                key = f"login_attempts:{username}"
+                key = redis_key(f"login_attempts:{username}")
                 self.redis.delete(key)
             except Exception as e:
                 print(f"Redis clear attempts failed: {e}")
@@ -143,7 +131,7 @@ class AuthManager:
             return True, "Login successful"
         else:
             self.record_failed_attempt(username)
-            remaining_attempts = self.max_attempts - len(self.login_attempts.get(username, []))
+            remaining_attempts = self.max_attempts - self._failed_attempt_count(username)
             if remaining_attempts > 0:
                 return False, f"Invalid credentials. {remaining_attempts} attempts remaining"
             else:
@@ -152,13 +140,3 @@ class AuthManager:
     def logout(self) -> None:
         logout_user()
         session.clear()
-
-
-def require_auth(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if not current_user.is_authenticated:
-            return redirect('/login')
-        return f(*args, **kwargs)
-    return decorated_function
-

@@ -1,0 +1,74 @@
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+app_simple_log.txt
+*.log.*
+
+# Cache files
+*.cache
+*_cache.json
+jazzhr_status_cache.json
+pdf_sizes_cache.json
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Temporary files
+*.tmp
+*.temp
+
+# Candidate data exports
+culture_index_surveys*.csv
+culture_index_surveys*.json
+
+# VPS worker
+worker.log
+worker.log.*
+.export.lock
+.uploads.lock

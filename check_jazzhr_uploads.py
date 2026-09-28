@@ -1,31 +1,79 @@
-import os
-import sys
-import json
-import requests
+"""JazzHR (Resumator API v1) client: applicant search, file listing, report
+matching and report upload."""
+import base64
+import threading
 import time
-from typing import Dict, List, Optional
-from urllib.parse import urlencode
+from datetime import datetime, timedelta
+from typing import Callable, Dict, List, Optional
+from urllib.parse import quote
 
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass
+import requests
 
-try:
-    from security_utils import is_safe_url
-except ImportError:
-    # Fallback if security_utils not available (for backwards compatibility)
-    def is_safe_url(url: str, verbose: bool = False):
-        """Fallback - no validation"""
-        return True, None
+from security_utils import is_safe_url
+
+JAZZHR_BASE_URL = "https://api.resumatorapi.com/v1"
+
+# When several JazzHR applicants share the survey taker's exact name, check at
+# most this many (newest first) for an existing report.
+MAX_APPLICANTS_PER_NAME = 5
+
+
+class RateLimiter:
+    """Rolling one-minute call limit shared by every thread that calls wait().
+
+    JazzHR allows 80 calls per minute per API key; the default keeps a margin.
+    """
+
+    def __init__(self, calls_per_minute: int = 72, on_wait: Optional[Callable[[float], None]] = None):
+        self.calls_per_minute = calls_per_minute
+        self._on_wait = on_wait
+        self._lock = threading.Lock()
+        self._call_times: List[datetime] = []
+
+    def wait(self, limit: Optional[int] = None) -> None:
+        """Block until a call fits in the window, then record it.
+
+        `limit` lowers the ceiling for this caller: background work passes a
+        smaller number so interactive checks always find room in the window.
+        """
+        ceiling = min(limit or self.calls_per_minute, self.calls_per_minute)
+        while True:
+            with self._lock:
+                now = datetime.now()
+                cutoff = now - timedelta(minutes=1)
+                self._call_times = [t for t in self._call_times if t >= cutoff]
+                if len(self._call_times) < ceiling:
+                    self._call_times.append(now)
+                    return
+                oldest_blocking = self._call_times[len(self._call_times) - ceiling]
+                wait_time = max(60 - (now - oldest_blocking).total_seconds() + 0.1, 0.1)
+            if self._on_wait:
+                self._on_wait(wait_time)
+            time.sleep(wait_time)
+
+
+class JazzHRAPIError(Exception):
+    """A JazzHR request failed. Callers must not read this as 'not found'."""
+
+
+def _normalize_name(value: str) -> str:
+    return " ".join((value or "").split()).casefold()
+
+
+def survey_id_from_report_url(url: str) -> Optional[str]:
+    """Report URLs end in First_Last_(12345678).pdf; return the number in brackets."""
+    if not url or '(' not in url:
+        return None
+    return url.split('/')[-1].split('_')[-1].replace('(', '').replace(')', '').replace('.pdf', '')
+
 
 class JazzHRUploadChecker:
-    def __init__(self, api_key: str, surveys_file: str = "culture_index_surveys.json"):
+    def __init__(self, api_key: str, before_request: Optional[Callable[[], None]] = None):
+        """before_request is called before every API call (used for rate limiting)."""
         self.api_key = api_key
-        self.surveys_file = surveys_file
-        self.base_url = "https://api.resumatorapi.com/v1"
-        
+        self.base_url = JAZZHR_BASE_URL
+        self._before_request = before_request
+
         self.session = requests.Session()
         adapter = requests.adapters.HTTPAdapter(
             pool_connections=10,
@@ -34,358 +82,141 @@ class JazzHRUploadChecker:
             pool_block=False
         )
         self.session.mount('https://', adapter)
-        self.session.mount('http://', adapter)
         self.session.headers.update({'Connection': 'keep-alive'})
-        
-        self.api_call_count = 0
-        self.api_call_times = []
-        self.search_times = []
-        self.file_check_times = []
-        
-    def _make_request(self, endpoint: str, params: Optional[Dict] = None, verbose: bool = False) -> Optional[Dict]:
+
+    def _throttle(self) -> None:
+        if self._before_request:
+            self._before_request()
+
+    def _make_request(self, endpoint: str, verbose: bool = False):
+        """GET an endpoint and return the parsed JSON. Raises JazzHRAPIError on any failure."""
+        self._throttle()
         url = f"{self.base_url}{endpoint}"
-        
-        if params is None:
-            params = {}
-        params['apikey'] = self.api_key
-        
-        from urllib.parse import urlencode
-        clean_params = {k: v for k, v in params.items() if k != 'apikey'}
-        full_url = f"{url}?{urlencode(params)}"
-        
         if verbose:
-            print(f"\n    [API] Endpoint: {endpoint}")
-            print(f"    [API] Parameters: {clean_params}")
-            print(f"    [API] Full URL: {full_url[:200]}..." if len(full_url) > 200 else f"    [API] Full URL: {full_url}")
-        
-        start_time = time.time()
+            print(f"    [API] GET {endpoint}")
+
+        start = time.time()
         try:
-            request_start = time.time()
-            if verbose:
-                print(f"    [API] Sending GET request at {time.strftime('%H:%M:%S')}...")
-            
-            connect_start = time.time()
-            response = self.session.get(url, params=params, timeout=30)
-            connect_time = time.time() - connect_start
-            
-            response_received = time.time()
-            if verbose:
-                print(f"    [API] Connection established: {connect_time:.3f}s")
-                print(f"    [API] Response received in {response_received - request_start:.2f}s")
-                print(f"    [API] Status code: {response.status_code}")
-                content_length = response.headers.get('Content-Length', 'chunked')
-                print(f"    [API] Response headers: Content-Type={response.headers.get('Content-Type', 'unknown')}, Content-Length={content_length}")
-                if content_length == 'chunked':
-                    print(f"    [API] Response is chunked (streaming)")
-            
+            response = self.session.get(url, params={'apikey': self.api_key}, timeout=30)
             response.raise_for_status()
-            
-            parse_start = time.time()
             result = response.json()
-            parse_time = time.time() - parse_start
-            
-            elapsed = time.time() - start_time
-            self.api_call_count += 1
-            self.api_call_times.append(elapsed)
-            
-            if verbose:
-                print(f"    [API] JSON parsed in {parse_time:.3f}s")
-                print(f"    [API] Response type: {type(result).__name__}")
-                if isinstance(result, list):
-                    print(f"    [API] Response is a list with {len(result)} items")
-                    if len(result) > 0:
-                        print(f"    [API] First item keys: {list(result[0].keys()) if isinstance(result[0], dict) else 'N/A'}")
-                        if isinstance(result[0], dict):
-                            first_item_sample = {k: str(v)[:50] for k, v in list(result[0].items())[:5]}
-                            print(f"    [API] First item sample: {first_item_sample}")
-                elif isinstance(result, dict):
-                    print(f"    [API] Response is a dict with keys: {list(result.keys())}")
-                    if len(result) > 0:
-                        first_key = list(result.keys())[0]
-                        print(f"    [API] First key '{first_key}': {str(result[first_key])[:100]}")
-                print(f"    [API] Total time: {elapsed:.2f}s")
-            
-            return result
         except requests.RequestException as e:
-            elapsed = time.time() - start_time
-            self.api_call_count += 1
-            if verbose:
-                print(f"\n    [ERROR] API request failed after {elapsed:.2f}s")
-                print(f"    [ERROR] URL: {full_url[:200]}")
-                print(f"    [ERROR] Exception: {e}")
-                if hasattr(e, 'response') and e.response is not None:
-                    try:
-                        error_body = e.response.text[:500]
-                        print(f"    [ERROR] Response body: {error_body}")
-                    except:
-                        pass
-            return None
-    
-    def search_applicant_by_name(self, first_name: str, last_name: str, verbose: bool = False) -> Optional[Dict]:
-        start_time = time.time()
-        first_name = first_name.strip()
-        last_name = last_name.strip()
-        full_name = f"{first_name} {last_name}"
-        
+            status = getattr(getattr(e, 'response', None), 'status_code', None)
+            raise JazzHRAPIError(f"GET {endpoint} failed (HTTP {status}): {type(e).__name__}") from None
+        except ValueError:
+            raise JazzHRAPIError(f"GET {endpoint} returned non-JSON content") from None
+
+        if isinstance(result, dict) and ("_error" in result or "error" in result):
+            raise JazzHRAPIError(f"GET {endpoint} returned an error: {result.get('_error') or result.get('error')}")
+
         if verbose:
-            print(f"    [SEARCH] Searching for applicant: {full_name}")
-        
-        from urllib.parse import quote
-        encoded_name = quote(full_name)
-        endpoint = f"/applicants/name/{encoded_name}"
-        
-        search_start = time.time()
-        response = self._make_request(endpoint, params=None, verbose=verbose)
-        search_time = time.time() - search_start
-        
-        if verbose:
-            print(f"    [SEARCH] Search API call completed in {search_time:.2f}s")
-        
-        if not response:
-            elapsed = time.time() - start_time
-            self.search_times.append(elapsed)
-            if verbose:
-                print(f"    [SEARCH] No response received")
-            return None
-        
-        parse_start = time.time()
+            count = len(result) if isinstance(result, list) else 1
+            print(f"    [API] {response.status_code} in {time.time() - start:.2f}s, {count} item(s)")
+        return result
+
+    def search_applicants_by_name(self, first_name: str, last_name: str, verbose: bool = False) -> List[Dict]:
+        """Applicants whose first and last name exactly match (case and spacing
+        ignored), newest application first.
+
+        JazzHR's name search is a loose match ("Patricia" returns every Patricia),
+        and one person can have several applicant records.
+        """
+        full_name = f"{first_name.strip()} {last_name.strip()}"
+        response = self._make_request(f"/applicants/name/{quote(full_name)}", verbose=verbose)
         applicants = response if isinstance(response, list) else [response] if response else []
-        
+
+        want_first, want_last = _normalize_name(first_name), _normalize_name(last_name)
+        exact = [
+            a for a in applicants
+            if _normalize_name(a.get('first_name')) == want_first
+            and _normalize_name(a.get('last_name')) == want_last
+        ]
+        exact.sort(key=lambda a: a.get('apply_date') or '', reverse=True)
+
         if verbose:
-            print(f"    [SEARCH] API returned {len(applicants)} applicant(s)")
-            if len(applicants) == 0:
-                print(f"    [SEARCH] No applicant found in API response")
-            elif len(applicants) == 1:
-                applicant = applicants[0]
-                app_first = applicant.get('first_name', '')
-                app_last = applicant.get('last_name', '')
-                applicant_id = applicant.get('id', 'unknown')
-                print(f"    [SEARCH] Found applicant: '{app_first} {app_last}' (ID: {applicant_id})")
-                if app_first.lower().strip() == first_name.lower().strip() and app_last.lower().strip() == last_name.lower().strip():
-                    print(f"    [SEARCH] Exact name match confirmed")
-                else:
-                    print(f"    [SEARCH] WARNING: Name mismatch! Expected '{first_name} {last_name}', got '{app_first} {app_last}'")
-            else:
-                print(f"    [SEARCH] WARNING: API returned {len(applicants)} applicants (expected 1)")
-                for idx, applicant in enumerate(applicants[:5]):
-                    app_first = applicant.get('first_name', '')
-                    app_last = applicant.get('last_name', '')
-                    applicant_id = applicant.get('id', 'unknown')
-                    print(f"    [SEARCH]   Applicant {idx+1}: '{app_first} {app_last}' (ID: {applicant_id})")
-        
-        elapsed = time.time() - start_time
-        self.search_times.append(elapsed)
-        
-        if len(applicants) > 0:
-            matched_applicant = applicants[0]
-            if verbose:
-                print(f"    [SEARCH] Total search time: {elapsed:.2f}s")
-            return matched_applicant
-        
+            print(f"    [SEARCH] '{full_name}': {len(applicants)} result(s), {len(exact)} exact match(es): "
+                  f"{[a.get('id') for a in exact[:MAX_APPLICANTS_PER_NAME]]}")
+        return exact
+
+    def get_applicant_files(self, applicant_id: str, verbose: bool = False) -> List[Dict]:
+        response = self._make_request(f"/files/applicant_id/{applicant_id}", verbose=verbose)
+        files = response if isinstance(response, list) else [response] if response else []
+        own_files = [f for f in files if f.get('applicant_id', '') == applicant_id]
+
         if verbose:
-            print(f"    [SEARCH] No applicant found (total time: {elapsed:.2f}s)")
-        return None
-    
-    def get_applicant_files(self, applicant_id: str, expected_name: str = None, verbose: bool = False) -> List[Dict]:
-        if verbose:
-            print(f"    [FILES] Fetching files for applicant: {applicant_id}")
-            if expected_name:
-                print(f"    [FILES] Expected applicant name: {expected_name}")
-        
-        endpoint = f"/files/applicant_id/{applicant_id}"
-        
-        files_start = time.time()
-        response = self._make_request(endpoint, params=None, verbose=verbose)
-        files_time = time.time() - files_start
-        
-        if verbose:
-            print(f"    [FILES] Files API call completed in {files_time:.2f}s")
-        
-        if not response:
-            if verbose:
-                print(f"    [FILES] No response received")
-            return []
-        
-        files = response if isinstance(response, list) else [response]
-        
-        if verbose:
-            print(f"    [FILES] Raw API response: {len(files)} file(s)")
-            print(f"    [FILES] Requested applicant_id: {applicant_id}")
-            if len(files) > 0:
-                print(f"    [FILES] Sample file structure (first file keys): {list(files[0].keys()) if isinstance(files[0], dict) else 'N/A'}")
-        
-        filtered_files = []
-        mismatched_files = []
-        for idx, file_data in enumerate(files):
-            file_applicant_id = file_data.get('applicant_id', '')
-            filename = file_data.get('filename', 'unknown')
-            
-            if verbose and idx < 10:
-                print(f"    [FILES] File {idx+1}: '{filename}' -> applicant_id in response: '{file_applicant_id}' (matches: {file_applicant_id == applicant_id})")
-            
-            if file_applicant_id == applicant_id:
-                filtered_files.append(file_data)
-            else:
-                mismatched_files.append(file_data)
-        
-        if verbose:
-            print(f"    [FILES] Filtering results:")
-            print(f"    [FILES]   Matching files: {len(filtered_files)}")
-            print(f"    [FILES]   Mismatched files: {len(mismatched_files)}")
-            if mismatched_files:
-                print(f"    [FILES] WARNING: Found {len(mismatched_files)} files with different applicant_id!")
-                print(f"    [FILES]   Expected applicant_id: {applicant_id}")
-                for mf in mismatched_files[:5]:
-                    mf_id = mf.get('applicant_id', 'MISSING')
-                    mf_name = mf.get('filename', 'unknown')
-                    print(f"    [FILES]   Mismatched: '{mf_name}' -> applicant_id: '{mf_id}'")
-            print(f"    [FILES] Returning {len(filtered_files)} file(s) for applicant {applicant_id}")
-            
-            for idx, file_data in enumerate(filtered_files[:5]):
-                filename = file_data.get('filename', 'unknown')
-                file_size = file_data.get('file_size', 'unknown')
-                file_app_id = file_data.get('applicant_id', 'unknown')
-                print(f"    [FILES]   File {idx+1}: {filename} ({file_size} bytes, applicant_id: {file_app_id})")
-            if len(filtered_files) > 5:
-                print(f"    [FILES]   ... and {len(filtered_files) - 5} more files")
-        
-        return filtered_files
-    
+            print(f"    [FILES] {applicant_id}: {len(own_files)} file(s) "
+                  f"{[f.get('filename') for f in own_files[:10]]}")
+        return own_files
+
     def check_pdf_match(
-        self, 
-        survey_pdf_url: str, 
-        survey_pdf_size: Optional[int], 
-        jazzhr_files: List[Dict], 
-        first_name: str = "", 
-        last_name: str = "", 
+        self,
+        survey_pdf_url: str,
+        survey_pdf_size: Optional[int],
+        jazzhr_files: List[Dict],
+        first_name: str = "",
+        last_name: str = "",
         verbose: bool = False
     ) -> Optional[Dict]:
+        """Find the survey's Culture Index report among one applicant's files.
+
+        Accepted evidence, strongest first:
+        1. The survey ID appears in the filename.
+        2. The filename equals the Culture Index report filename.
+        3. The filename carries "CultureIndex" (this tool's upload name) plus the person's name.
+        4. The filename contains the person's name AND the size matches the report size.
+        Size alone is never enough.
         """
-        Match Culture Index PDF with JazzHR files using strict criteria.
-        
-        Matching Strategy (from most to least reliable):
-        1. Exact filename match + size verification
-        2. Full name pattern + size verification (REQUIRED)
-        3. Size-only match (as fallback when filename unavailable)
-        """
-        start_time = time.time()
-        
         if not survey_pdf_url:
-            if verbose:
-                print(f"    [MATCH] No PDF URL provided")
             return None
-        
-        ci_filename = survey_pdf_url.split('/')[-1] if survey_pdf_url else None
-        
-        if verbose:
-            print(f"    [MATCH] CI filename: {ci_filename}")
-            print(f"    [MATCH] CI file size: {survey_pdf_size} bytes")
-            print(f"    [MATCH] Person: {first_name} {last_name}")
-            print(f"    [MATCH] Checking {len(jazzhr_files)} JazzHR files...")
-        
-        ci_basename = None
-        if ci_filename:
-            ci_basename = ci_filename.replace('.pdf', '').split('_(')[0]
-        
-        first_initial = first_name[0].lower() if first_name else ''
-        last_initial = last_name[0].lower() if last_name else ''
+
+        ci_filename = survey_pdf_url.split('/')[-1]
+        ci_filename_lower = ci_filename.lower()
+        survey_id = survey_id_from_report_url(survey_pdf_url)
         full_name_clean = f"{first_name} {last_name}".lower() if first_name and last_name else ""
-        
-        if verbose and ci_basename:
-            print(f"    [MATCH] CI basename: {ci_basename}")
-            if first_initial and last_initial:
-                print(f"    [MATCH] Initials: {first_initial.upper()}{last_initial.upper()}")
-        
-        for idx, file_data in enumerate(jazzhr_files):
-            if verbose and idx < 5:
-                jazz_filename = file_data.get('filename', 'unknown')
-                jazz_size = file_data.get('file_size', 'unknown')
-                print(f"    [MATCH] Checking file {idx+1}/{len(jazzhr_files)}: {jazz_filename} ({jazz_size} bytes)")
-            
+
+        for file_data in jazzhr_files:
             jazz_filename = (file_data.get('filename') or '').strip()
-            jazz_size = int(file_data.get('file_size', 0))
+            jazz_size = int(file_data.get('file_size') or 0)
             jazz_lower = jazz_filename.lower()
-            
-            name_match = False
+
             match_type = None
-            
-            if ci_filename:
-                ci_filename_lower = ci_filename.lower()
-                if ci_filename_lower == jazz_lower or ci_filename_lower.replace('.pdf', '') == jazz_lower.replace('.pdf', ''):
-                    name_match = True
-                    match_type = 'exact_filename'
-            
-            survey_id = survey_pdf_url.split('/')[-1].split('_')[-1].replace('(', '').replace(')', '').replace('.pdf', '') if '(' in survey_pdf_url else None
-            if not name_match and survey_id and first_name and last_name:
-                expected_pattern = f"{first_name}_{last_name}_({survey_id})".lower().replace(' ', '_')
-                if expected_pattern in jazz_lower.replace(' ', '_'):
-                    name_match = True
-                    match_type = 'uploaded_filename_pattern'
-            
-            # Strict full name matching (stronger than initials to avoid false positives)
-            if not name_match and first_name and last_name and full_name_clean:
-                # Check for full name in filename
-                if full_name_clean in jazz_lower:
-                    name_match = True
-                    match_type = 'full_name'
-                # Check for "FirstName_LastName" pattern
-                elif f"{first_name.lower()}_{last_name.lower()}" in jazz_lower.replace(' ', '_'):
-                    name_match = True
-                    match_type = 'name_pattern'
-            
+            if ci_filename_lower == jazz_lower or ci_filename_lower.replace('.pdf', '') == jazz_lower.replace('.pdf', ''):
+                match_type = 'exact_filename'
+            elif survey_id and first_name and last_name and \
+                    f"{first_name}_{last_name}_({survey_id})".lower().replace(' ', '_') in jazz_lower.replace(' ', '_'):
+                match_type = 'uploaded_filename_pattern'
+            elif full_name_clean and full_name_clean in jazz_lower:
+                match_type = 'full_name'
+            elif first_name and last_name and f"{first_name.lower()}_{last_name.lower()}" in jazz_lower.replace(' ', '_'):
+                match_type = 'name_pattern'
+            name_match = match_type is not None
+
             size_match = False
             if survey_pdf_size and jazz_size:
-                size_diff = abs(jazz_size - survey_pdf_size)
                 size_tolerance = max(2048, int(survey_pdf_size * 0.02))
-                if jazz_size == survey_pdf_size or size_diff <= size_tolerance:
-                    size_match = True
+                size_match = abs(jazz_size - survey_pdf_size) <= size_tolerance
 
             # "CultureIndex" in the filename is this tool's own upload signature.
-            # Files are already pre-filtered to a single applicant, so a CI-report
-            # file on this person's profile IS their CI report. Do NOT require a
-            # size match: Culture Index regenerates report PDFs over time, so the
-            # size fetched today rarely equals the size stored at upload time.
-            jazz_normalized = jazz_lower.replace(' ', '').replace('_', '').replace('-', '')
-            is_ci_report_file = 'cultureindex' in jazz_normalized
+            # Culture Index regenerates report PDFs over time, so the size fetched
+            # today rarely equals the size stored at upload time; don't require it.
+            is_ci_report_file = 'cultureindex' in jazz_lower.replace(' ', '').replace('_', '').replace('-', '')
 
             is_match = False
             if survey_id and survey_id in jazz_filename:
-                # Survey ID embedded in the JazzHR filename: most precise possible match
                 match_type = 'survey_id_in_filename'
                 is_match = True
-            elif match_type == 'exact_filename' and name_match:
-                # Exact filename match is highly reliable, size is optional
+            elif match_type == 'exact_filename':
                 is_match = True
             elif is_ci_report_file and name_match:
-                # CI-report file for this named person: filename signature is definitive
-                if not match_type:
-                    match_type = 'ci_report_name'
                 is_match = True
-            elif match_type in ['uploaded_filename_pattern', 'full_name', 'name_pattern']:
-                # Generic name match on a non-CI file: keep size verification to
-                # avoid false positives (e.g. matching an unrelated resume)
-                if size_match and survey_pdf_size:
-                    is_match = True
-            elif size_match and survey_pdf_size:
-                # Size-only match acceptable if very close (within tolerance)
+            elif name_match and size_match:
+                # A name-only match could be a resume or cover letter; require the size too.
                 is_match = True
-            
+
             if is_match:
-                elapsed = time.time() - start_time
-                self.file_check_times.append(elapsed)
-                
-                if name_match and size_match:
-                    matched_by = f'name ({match_type}) and size'
-                elif size_match:
-                    matched_by = 'size (exact bytes)'
-                else:
-                    matched_by = f'name ({match_type})'
-                
+                matched_by = f'name ({match_type}) and size' if size_match else f'name ({match_type})'
                 if verbose:
-                    print(f"    [MATCH] MATCH FOUND! Matched by: {matched_by}")
-                    print(f"    [MATCH] Matching file: {file_data.get('filename')}")
-                    print(f"    [MATCH] Matching took {elapsed:.3f}s")
-                
+                    print(f"    [MATCH] {jazz_filename} matched by {matched_by}")
                 return {
                     'file': file_data,
                     'matched_by': matched_by,
@@ -393,13 +224,61 @@ class JazzHRUploadChecker:
                     'name_match': name_match,
                     'size_match': size_match
                 }
-        
-        elapsed = time.time() - start_time
-        self.file_check_times.append(elapsed)
+
         if verbose:
-            print(f"    [MATCH] No match found after checking {len(jazzhr_files)} files ({elapsed:.3f}s)")
+            print(f"    [MATCH] no match among {len(jazzhr_files)} file(s) (CI file {ci_filename}, size {survey_pdf_size})")
         return None
-    
+
+    def check_survey_status(
+        self,
+        first_name: str,
+        last_name: str,
+        pdf_url: Optional[str],
+        pdf_size: Optional[int],
+        verbose: bool = False
+    ) -> Dict:
+        """Decide a survey's JazzHR status. Raises JazzHRAPIError if JazzHR could not be read.
+
+        The report counts as uploaded if it is on ANY applicant record with the
+        person's exact name. Uploads target the newest such record.
+        """
+        first_name = (first_name or '').strip()
+        last_name = (last_name or '').strip()
+        if not first_name or not last_name:
+            return {"status": "MISSING_NAME", "isUploaded": False}
+        if not pdf_url:
+            return {"status": "NO_PDF_URL", "isUploaded": False}
+
+        applicants = self.search_applicants_by_name(first_name, last_name, verbose=verbose)
+        if not applicants:
+            return {"status": "NOT_IN_JAZZHR", "isUploaded": False}
+
+        candidates = applicants[:MAX_APPLICANTS_PER_NAME]
+        file_count = 0
+        for applicant in candidates:
+            files = self.get_applicant_files(applicant.get('id'), verbose=verbose)
+            file_count += len(files)
+            match = self.check_pdf_match(pdf_url, pdf_size, files, first_name, last_name, verbose=verbose)
+            if match:
+                return {
+                    "status": "UPLOADED",
+                    "applicantId": applicant.get('id'),
+                    "isUploaded": True,
+                    "match": match,
+                    "file_count": len(files),
+                    "applicant_count": len(applicants),
+                    "had_pdf_size": pdf_size is not None,
+                }
+
+        return {
+            "status": "NOT_UPLOADED",
+            "applicantId": candidates[0].get('id'),
+            "isUploaded": False,
+            "file_count": file_count,
+            "applicant_count": len(applicants),
+            "had_pdf_size": pdf_size is not None,
+        }
+
     def upload_file_to_applicant(
         self,
         applicant_id: str,
@@ -409,395 +288,79 @@ class JazzHRUploadChecker:
         verbose: bool = False,
         pdf_bytes: Optional[bytes] = None,
     ) -> Dict:
-        import base64
+        """Attach a report PDF to an applicant as First_Last_CultureIndex.pdf.
 
-        # The caller may pre-fetch the PDF via the authenticated Culture Index
-        # client (the public surveyReportUrl now serves an HTML viewer, not a
-        # PDF). If pdf_bytes is provided, use it and skip the unauthenticated
-        # download path entirely.
+        Pass pdf_bytes when the caller already fetched the PDF; otherwise it is
+        downloaded from pdf_url. Content that is not a PDF is never uploaded.
+        """
         if pdf_bytes is not None:
             pdf_content = pdf_bytes
-            if verbose:
-                print(f"    [UPLOAD] Using pre-fetched PDF ({len(pdf_content)} bytes)")
             if pdf_content[:5] != b'%PDF-':
                 return {"success": False, "error": "Pre-fetched content is not a PDF"}
         else:
-            # SECURITY: Validate URL before downloading (SSRF protection)
             is_safe, error_msg = is_safe_url(pdf_url, verbose=verbose)
             if not is_safe:
-                error = f"Unsafe URL blocked: {error_msg}"
-                if verbose:
-                    print(f"    [UPLOAD] {error}")
-                return {"success": False, "error": error}
+                return {"success": False, "error": f"Unsafe URL blocked: {error_msg}"}
 
             try:
-                if verbose:
-                    print(f"    [UPLOAD] Downloading PDF from {pdf_url[:60]}...")
-
                 resp = self.session.get(pdf_url, timeout=30)
                 resp.raise_for_status()
                 pdf_content = resp.content
-
-                is_pdf = pdf_content[:5] == b'%PDF-'
-                if verbose:
-                    ctype = resp.headers.get('Content-Type', 'unknown')
-                    print(f"    [UPLOAD] Downloaded {len(pdf_content)} bytes, Content-Type={ctype}")
-                    print(f"    [UPLOAD] First 20 bytes: {pdf_content[:20]!r}  valid_pdf_header={is_pdf}")
-                if not is_pdf:
-                    snippet = pdf_content[:200].decode('utf-8', errors='replace')
-                    print(f"    [UPLOAD] NOT A PDF — content starts with: {snippet!r}")
-                    return {"success": False, "error": f"Downloaded content is not a PDF (got {len(pdf_content)} bytes, Content-Type={resp.headers.get('Content-Type','unknown')})"}
             except Exception as e:
                 return {"success": False, "error": f"Failed to download PDF: {e}"}
 
-        file_data = base64.b64encode(pdf_content).decode('utf-8')
-        
+            if pdf_content[:5] != b'%PDF-':
+                ctype = resp.headers.get('Content-Type', 'unknown')
+                return {"success": False, "error": f"Downloaded content is not a PDF (got {len(pdf_content)} bytes, Content-Type={ctype})"}
+
+        if not self.api_key:
+            return {"success": False, "error": "JazzHR API key is not set"}
+
         safe_first = ''.join(c for c in first_name if c.isalnum() or c in ' -_').strip().replace(' ', '_')
         safe_last = ''.join(c for c in last_name if c.isalnum() or c in ' -_').strip().replace(' ', '_')
         filename = f"{safe_first}_{safe_last}_CultureIndex.pdf"
-        
+
+        # POST /files parses ONLY a JSON body (confirmed in JazzHR's Swagger);
+        # form-encoded fields are silently ignored. Errors come back as HTTP 200
+        # with {"_error": "..."}.
+        payload = {
+            "apikey": self.api_key,
+            "applicant_id": applicant_id,
+            "filename": filename,
+            "file_data": base64.b64encode(pdf_content).decode('utf-8'),
+            "file_privacy": "0",
+        }
+
+        if verbose:
+            print(f"    [UPLOAD] Sending JSON body for {filename} ({len(pdf_content)} bytes) to applicant {applicant_id}")
+
         try:
-            if not self.api_key:
-                return {"success": False, "error": "API key is None or empty in JazzHRUploadChecker"}
-            
-            # The Resumator API parses ONLY a JSON body (Content-Type:
-            # application/json) for this endpoint. Confirmed via JazzHR's own
-            # Swagger "Try it out": all params (apikey, applicant_id, filename,
-            # file_data, file_privacy) go in the JSON body, with no query string.
-            # Form-encoded bodies are silently ignored by the API.
-            url = f"{self.base_url}/files"
-            payload = {
-                "apikey": self.api_key,
-                "applicant_id": applicant_id,
-                "filename": filename,
-                "file_data": file_data,
-                "file_privacy": "0",
-            }
-
-            if verbose:
-                print(f"    [UPLOAD] Uploading {filename} to applicant {applicant_id}...")
-                print(f"    [UPLOAD] URL: {url}")
-                print(f"    [UPLOAD] Sending JSON body with keys: {list(payload.keys())} (file_data {len(file_data)} chars)")
-
-            resp = self.session.post(url, json=payload, timeout=60)
+            self._throttle()
+            resp = self.session.post(f"{self.base_url}/files", json=payload, timeout=60)
             resp.raise_for_status()
-            
             result = resp.json()
-            
-            if verbose:
-                print(f"    [UPLOAD] Response: {result}")
-            
-            if isinstance(result, str):
-                if result.lower().startswith("error"):
-                    return {"success": False, "error": result}
-                return {"success": True, "message": result, "filename": filename}
-            
-            if isinstance(result, dict) and ("error" in result or "_error" in result):
-                error_msg = result.get("error") or result.get("_error", str(result))
-                return {"success": False, "error": error_msg}
-            
-            return {
-                "success": True, 
-                "message": f"Uploaded {filename}",
-                "file_id": result.get("id") if isinstance(result, dict) else None,
-                "filename": filename
-            }
-            
         except requests.RequestException as e:
             error_msg = str(e)
-            if hasattr(e, 'response') and e.response is not None:
-                try:
-                    error_msg = e.response.text[:200]
-                except:
-                    pass
+            if getattr(e, 'response', None) is not None:
+                error_msg = e.response.text[:200]
             return {"success": False, "error": f"Upload failed: {error_msg}"}
-    
-    def check_all_surveys(self, start_idx: Optional[int] = None, end_idx: Optional[int] = None) -> Dict:
-        overall_start_time = time.time()
-        
-        print("Loading surveys...")
-        load_start = time.time()
-        if not os.path.exists(self.surveys_file):
-            print(f"ERROR: Survey file not found: {self.surveys_file}")
-            return {"error": "Survey file not found"}
-        
-        try:
-            with open(self.surveys_file, 'r', encoding='utf-8') as f:
-                all_surveys = json.load(f)
-        except json.JSONDecodeError as e:
-            print(f"ERROR: JSON file is corrupted or invalid")
-            print(f"ERROR: {e}")
-            print(f"ERROR: Error at line {e.lineno}, column {e.colno}")
-            
-            try:
-                with open(self.surveys_file, 'r', encoding='utf-8') as f:
-                    lines = f.readlines()
-                    error_line = e.lineno - 1
-                    start_line = max(0, error_line - 3)
-                    end_line = min(len(lines), error_line + 4)
-                    print(f"\nContext around error (lines {start_line+1}-{end_line}):")
-                    for i in range(start_line, end_line):
-                        marker = ">>> " if i == error_line else "    "
-                        print(f"{marker}{i+1}: {lines[i].rstrip()}")
-            except Exception as read_err:
-                print(f"Could not read file for context: {read_err}")
-            
-            return {"error": f"JSON decode error: {e}"}
-        except Exception as e:
-            print(f"ERROR: Failed to load surveys file: {e}")
-            return {"error": str(e)}
-        
-        load_time = time.time() - load_start
-        print(f"Loaded surveys in {load_time:.2f}s")
-        
-        total_count = len(all_surveys)
-        start = start_idx if start_idx is not None else 0
-        end = end_idx if end_idx is not None else total_count
-        
-        if start < 0:
-            start = 0
-        if end > total_count:
-            end = total_count
-        if start >= end:
-            print(f"ERROR: Invalid range. Start ({start}) must be less than end ({end})")
-            return {"error": "Invalid range"}
-        
-        surveys = all_surveys[start:end]
-        
-        range_info = ""
-        if start_idx is not None or end_idx is not None:
-            range_info = f" (surveys {start+1}-{end} of {total_count})"
-        
-        print(f"Loaded {len(all_surveys)} total surveys")
-        print(f"Checking {len(surveys)} surveys{range_info}")
-        print("\nChecking JazzHR for uploaded Culture Index PDFs...\n")
-        
-        stats = {
-            'total': len(all_surveys),
-            'checked_in_range': len(surveys),
-            'checked': 0,
-            'found_in_jazzhr': 0,
-            'pdf_uploaded': 0,
-            'pdf_not_uploaded': 0,
-            'not_found_in_jazzhr': 0,
-            'no_pdf_url': 0,
-            'range_start': start + 1,
-            'range_end': end
+        except ValueError:
+            return {"success": False, "error": "Upload failed: JazzHR returned non-JSON content"}
+
+        if verbose:
+            print(f"    [UPLOAD] Response: {result}")
+
+        if isinstance(result, str):
+            if result.lower().startswith("error"):
+                return {"success": False, "error": result}
+            return {"success": True, "message": result, "filename": filename}
+
+        if isinstance(result, dict) and ("error" in result or "_error" in result):
+            return {"success": False, "error": result.get("error") or result.get("_error")}
+
+        return {
+            "success": True,
+            "message": f"Uploaded {filename}",
+            "file_id": result.get("id") if isinstance(result, dict) else None,
+            "filename": filename
         }
-        
-        processing_start_time = time.time()
-        
-        for idx, survey in enumerate(surveys, 1):
-            survey_start_time = time.time()
-            actual_idx = start + idx
-            first_name = survey.get('firstName', '').strip()
-            last_name = survey.get('lastName', '').strip()
-            survey_id = survey.get('surveyId')
-            pdf_url = survey.get('surveyReportUrl')
-            pdf_size = survey.get('pdfSize')
-            
-            if not first_name or not last_name:
-                survey['jazzhrStatus'] = 'MISSING_NAME'
-                continue
-            
-            if not pdf_url:
-                survey['jazzhrStatus'] = 'NO_PDF_URL'
-                stats['no_pdf_url'] += 1
-                continue
-            
-            stats['checked'] += 1
-            
-            print(f"[{actual_idx}/{total_count}] Checking {first_name} {last_name}...")
-            print(f"  [STEP 1] Starting check at {time.strftime('%H:%M:%S')}")
-            
-            search_start = time.time()
-            applicant = self.search_applicant_by_name(first_name, last_name, verbose=True)
-            search_elapsed = time.time() - search_start
-            
-            if not applicant:
-                elapsed = time.time() - survey_start_time
-                print(f"  [RESULT] Not found in JazzHR")
-                print(f"  [TIMING] Search: {search_elapsed:.2f}s | Total: {elapsed:.2f}s\n")
-                survey['jazzhrStatus'] = 'NOT_IN_JAZZHR'
-                survey['jazzhrApplicantId'] = None
-                stats['not_found_in_jazzhr'] += 1
-                continue
-            
-            applicant_id = applicant.get('id')
-            applicant_name = f"{applicant.get('first_name', '')} {applicant.get('last_name', '')}"
-            stats['found_in_jazzhr'] += 1
-            print(f"  [STEP 2] Applicant found: {applicant_id} ({applicant_name})")
-            
-            files_start = time.time()
-            files = self.get_applicant_files(applicant_id, expected_name=applicant_name, verbose=True)
-            files_elapsed = time.time() - files_start
-            
-            if not files:
-                elapsed = time.time() - survey_start_time
-                print(f"  [RESULT] Found in JazzHR, but no files")
-                print(f"  [TIMING] Search: {search_elapsed:.2f}s | Files: {files_elapsed:.2f}s | Total: {elapsed:.2f}s\n")
-                survey['jazzhrStatus'] = 'NO_FILES'
-                survey['jazzhrApplicantId'] = applicant_id
-                survey['jazzhrFileCount'] = 0
-                stats['pdf_not_uploaded'] += 1
-                continue
-            
-            print(f"  [STEP 3] Checking PDF match...")
-            match_start = time.time()
-            match = self.check_pdf_match(pdf_url, pdf_size, files, first_name, last_name, verbose=True)
-            match_elapsed = time.time() - match_start
-            
-            elapsed = time.time() - survey_start_time
-            if match:
-                print(f"  [RESULT] PDF UPLOADED (matched by {match['matched_by']})")
-                print(f"  [TIMING] Search: {search_elapsed:.2f}s | Files: {files_elapsed:.2f}s | Match: {match_elapsed:.3f}s | Total: {elapsed:.2f}s\n")
-                survey['jazzhrStatus'] = 'CULTURE INDEX COMPLETE'
-                survey['jazzhrApplicantId'] = applicant_id
-                survey['jazzhrFileCount'] = len(files)
-                survey['jazzhrMatchedFile'] = {
-                    'filename': match['file'].get('filename'),
-                    'file_id': match['file'].get('id'),
-                    'file_size': match['file'].get('file_size'),
-                    'date_loaded': match['file'].get('date_loaded'),
-                    'matched_by': match['matched_by']
-                }
-                stats['pdf_uploaded'] += 1
-            else:
-                print(f"  [RESULT] Found in JazzHR, but PDF not uploaded ({len(files)} files)")
-                print(f"  [TIMING] Search: {search_elapsed:.2f}s | Files: {files_elapsed:.2f}s | Match: {match_elapsed:.3f}s | Total: {elapsed:.2f}s\n")
-                survey['jazzhrStatus'] = 'PDF_NOT_UPLOADED'
-                survey['jazzhrApplicantId'] = applicant_id
-                survey['jazzhrFileCount'] = len(files)
-                stats['pdf_not_uploaded'] += 1
-            
-            if idx % 10 == 0:
-                time.sleep(0.5)
-            
-            if idx % 50 == 0:
-                elapsed_so_far = time.time() - processing_start_time
-                avg_per_survey = elapsed_so_far / idx
-                remaining = len(surveys) - idx
-                estimated_remaining = avg_per_survey * remaining
-                print(f"\n  [PROGRESS] Processed {idx}/{len(surveys)} surveys in {elapsed_so_far:.1f}s")
-                print(f"  [PROGRESS] Average: {avg_per_survey:.2f}s per survey")
-                print(f"  [PROGRESS] Estimated time remaining: {estimated_remaining/60:.1f} minutes\n")
-        
-        processing_time = time.time() - processing_start_time
-        
-        print(f"\nSaving updated surveys to {self.surveys_file}...")
-        save_start = time.time()
-        with open(self.surveys_file, 'w', encoding='utf-8') as f:
-            json.dump(all_surveys, f, indent=2, ensure_ascii=False)
-        save_time = time.time() - save_start
-        print(f"Saved in {save_time:.2f}s")
-        
-        overall_time = time.time() - overall_start_time
-        
-        stats['performance'] = {
-            'total_time': overall_time,
-            'load_time': load_time,
-            'processing_time': processing_time,
-            'save_time': save_time,
-            'api_calls': self.api_call_count,
-            'avg_api_call_time': sum(self.api_call_times) / len(self.api_call_times) if self.api_call_times else 0,
-            'max_api_call_time': max(self.api_call_times) if self.api_call_times else 0,
-            'min_api_call_time': min(self.api_call_times) if self.api_call_times else 0,
-            'avg_search_time': sum(self.search_times) / len(self.search_times) if self.search_times else 0,
-            'avg_file_check_time': sum(self.file_check_times) / len(self.file_check_times) if self.file_check_times else 0,
-            'avg_per_survey': processing_time / len(surveys) if len(surveys) > 0 else 0
-        }
-        
-        print("\nDone!")
-        return stats
-
-def main():
-    import argparse
-    
-    parser = argparse.ArgumentParser(
-        description='Check if Culture Index PDFs have been uploaded to JazzHR',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Check all surveys
-  python check_jazzhr_uploads.py
-  
-  # Check 150 surveys starting from survey 1
-  python check_jazzhr_uploads.py --start 1 --limit 150
-  
-  # Check surveys 250-400
-  python check_jazzhr_uploads.py --start 250 --end 400
-  
-  # Check 300 surveys starting from survey 500
-  python check_jazzhr_uploads.py --start 500 --limit 300
-  
-  # Check from survey 100 to the end
-  python check_jazzhr_uploads.py --start 100
-
-Note: Survey numbers use 1-based indexing (survey 1 is the first survey)
-        """
-    )
-    parser.add_argument('--file', default='culture_index_surveys.json', 
-                       help='Path to surveys JSON file')
-    parser.add_argument('--api-key', help='JazzHR API key (or set JAZZHR_API_KEY env var)')
-    parser.add_argument('--start', type=int, metavar='N',
-                       help='Start at survey N (1-based indexing, default: 1)')
-    parser.add_argument('--end', type=int, metavar='N',
-                       help='End at survey N (1-based indexing, exclusive)')
-    parser.add_argument('--limit', type=int, metavar='N',
-                       help='Check N surveys from start position')
-    
-    args = parser.parse_args()
-    
-    api_key = args.api_key or os.getenv('JAZZHR_API_KEY')
-    
-    if not api_key:
-        print("ERROR: JazzHR API key not provided")
-        print("Set JAZZHR_API_KEY environment variable or use --api-key")
-        return 1
-    
-    if args.end is not None and args.limit is not None:
-        print("ERROR: Cannot use both --end and --limit at the same time")
-        return 1
-    
-    start_idx = None
-    end_idx = None
-    
-    if args.start is not None:
-        if args.start < 1:
-            print("ERROR: --start must be >= 1")
-            return 1
-        start_idx = args.start - 1
-        
-        if args.limit is not None:
-            if args.limit <= 0:
-                print("ERROR: --limit must be > 0")
-                return 1
-            end_idx = start_idx + args.limit
-        elif args.end is not None:
-            if args.end <= args.start:
-                print("ERROR: --end must be greater than --start")
-                return 1
-            end_idx = args.end      
-    elif args.end is not None:
-        if args.end < 1:
-            print("ERROR: --end must be >= 1")
-            return 1
-        start_idx = 0
-        end_idx = args.end
-    elif args.limit is not None:
-        if args.limit <= 0:
-            print("ERROR: --limit must be > 0")
-            return 1
-        start_idx = 0
-        end_idx = args.limit
-    
-    checker = JazzHRUploadChecker(api_key=api_key, surveys_file=args.file)
-    stats = checker.check_all_surveys(start_idx=start_idx, end_idx=end_idx)
-    
-    if 'error' in stats:
-        return 1
-    
-    return 0
-
-if __name__ == "__main__":
-    sys.exit(main())

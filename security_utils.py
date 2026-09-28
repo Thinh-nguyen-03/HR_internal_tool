@@ -92,19 +92,3 @@ def is_safe_url(url: str, verbose: bool = False) -> Tuple[bool, Optional[str]]:
         if verbose:
             print(f"[SECURITY] {error}: {url}")
         return False, error
-
-
-def validate_url_or_raise(url: str, verbose: bool = False) -> None:
-    """Validate URL and raise ValueError if unsafe."""
-    is_safe, error_msg = is_safe_url(url, verbose=verbose)
-    if not is_safe:
-        raise ValueError(f"Unsafe URL blocked: {error_msg}")
-
-
-def get_safe_url_info() -> dict:
-    """Get URL validation configuration (for debugging/health checks)."""
-    return {
-        "allowed_schemes": ALLOWED_SCHEMES,
-        "allowed_domains": ALLOWED_DOMAINS,
-        "extra_domains_from_env": EXTRA_ALLOWED_DOMAINS
-    }

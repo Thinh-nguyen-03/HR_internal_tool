@@ -1,143 +1,86 @@
 # HR Internal Tool
 
-A web application for managing Culture Index surveys and integrating with JazzHR. Enables viewing, searching, and uploading survey PDFs to JazzHR applicant profiles.
+Internal web app for the HR team. It lists Culture Index surveys, shows whether
+each candidate's Culture Index report is already attached to their JazzHR
+applicant profile, and uploads the missing ones.
 
-## Features
+It runs in two parts, because Culture Index blocks Render's IP:
 
-- **Survey Management**: View and search Culture Index surveys with pagination
-- **JazzHR Integration**: Check upload status and upload survey PDFs to JazzHR
-- **Background Processing**: Automatic status checking for surveys
-- **Authentication**: Secure login system with rate limiting
-- **Caching**: Redis-based caching for performance optimization
+- **Website (Render):** `app_dash_simple.py`. Login, survey list, JazzHR status
+  checks, upload requests. Never contacts Culture Index.
+- **Worker (SEnergy VPS, cron):** `vps_worker.py`. Exports the survey list from
+  Culture Index and performs the uploads. Outbound connections only.
 
-## Prerequisites
+They share state through Upstash Redis. Architecture and known issues:
+[CODEBASE_DOCUMENTATION.md](CODEBASE_DOCUMENTATION.md).
 
-- Python 3.11+
-- Redis instance (Upstash or local)
-- Culture Index API credentials
-- JazzHR API key
+## Requirements
 
-## Installation
+- Python 3.11 (pinned in `.python-version` and `render.yaml`)
+- Upstash Redis (`REDIS_URL`), used by both parts
+- JazzHR API key (both parts); Culture Index login (worker only)
 
-1. Clone the repository
-2. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-## Configuration
-
-Create a `.env` file in the project root with the following variables:
-
-### Required
-```env
-# Authentication
-APP_USERNAME=senergy_hr
-APP_PASSWORD=your_password
-SECRET_KEY=your_secret_key
-
-# Culture Index API
-CULTUREINDEX_EMAIL=your_email@example.com
-CULTUREINDEX_PASSWORD=your_password
-CLIENT_ID=A89F5B0000
-
-# JazzHR API
-JAZZHR_API_KEY=your_jazzhr_api_key
-```
-
-### Optional - Application Settings
-```env
-ITEMS_PER_PAGE=15                    # Surveys per page
-POLL_INTERVAL_MS=30000               # UI refresh interval (milliseconds)
-MAX_BATCH_UPLOAD=15                  # Maximum surveys per batch upload
-MAX_WORKERS=4                        # Thread pool size for parallel operations
-MAX_BACKGROUND_CHECK=250             # Maximum surveys to check in background
-RECENT_SURVEY_THRESHOLD=1000         # Recent surveys count for cache optimization
-PDF_FETCH_TIMEOUT=5                  # PDF size fetch timeout (seconds)
-```
-
-### Optional - Caching
-```env
-CACHE_BACKEND=redis                  # Cache backend: 'redis' or 'file'
-JAZZHR_CACHE_HOURS=24                # JazzHR status cache TTL (hours)
-
-# Redis Configuration (required if CACHE_BACKEND=redis)
-REDIS_URL=rediss://your_redis_url
-REDIS_CONNECT_TIMEOUT=5              # Connection timeout (seconds)
-REDIS_SOCKET_TIMEOUT=5               # Socket timeout (seconds)
-REDIS_MAX_CONNECTIONS=50             # Maximum connection pool size
-REDIS_MAX_RETRIES=2                  # Maximum retry attempts
-REDIS_HEALTH_CHECK_INTERVAL=30       # Health check interval (seconds)
-```
-
-### Optional - Upload Settings
-```env
-UPLOAD_INTERVAL_MS=1000              # Upload processing interval (milliseconds)
-UPLOAD_MAX_RETRIES=3                 # Maximum upload retry attempts
-UPLOAD_RETRY_DELAY_BASE=2            # Base retry delay (seconds)
-UPLOAD_RETRY_DELAY_MAX=10            # Maximum retry delay (seconds)
-```
-
-### Optional - Security
-```env
-SESSION_COOKIE_SECURE=True           # Enable secure cookies (HTTPS only)
-```
-
-## Running the Application
-
-### Development
 ```bash
-python app.py
+pip install -r requirements.txt
 ```
 
-The application will start on `http://127.0.0.1:8051`
+## Website configuration (Render environment)
 
-### Production
-```bash
-gunicorn app:server
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `APP_USERNAME`, `APP_PASSWORD` | required | The single app login |
+| `SECRET_KEY` | required | Flask session signing |
+| `JAZZHR_API_KEY` | required | JazzHR status checks |
+| `REDIS_URL` | required | Shared state |
+| `KEY_PREFIX` | empty | Prefix for every Redis key; use e.g. `test:` to keep a test run off production data |
+| `SESSION_COOKIE_SECURE` | `True` | Set `False` only for plain-http local runs |
+| `ITEMS_PER_PAGE` | 15 | Surveys per page |
+| `MAX_BATCH_UPLOAD` | 15 | Most surveys in one "Upload Selected" |
+| `MAX_BACKGROUND_CHECK` | 50 | How many of the newest surveys are kept fresh in the background |
+| `RECENT_SURVEY_THRESHOLD` | 1000 | Newest surveys whose status goes stale; older ones never do on their own |
+| `JAZZHR_CACHE_HOURS` | 2 | When a recent survey's status counts as stale (it is still shown while rechecked) |
+| `JAZZHR_CALLS_PER_MINUTE` | 60 | JazzHR budget for this app (JazzHR allows 80; the worker uses 15) |
+| `BACKGROUND_CALLS_PER_MINUTE` | 35 | Ceiling for background checks inside that budget |
+| `UI_POLL_INTERVAL_MS` | 3000 | How often a browser tab asks this app for changes (no Redis cost) |
+| `SNAPSHOT_POLL_SECONDS`, `SNAPSHOT_POLL_SECONDS_OFF_HOURS` | 60, 300 | How often the app reads the worker's state from Redis |
+| `BACKGROUND_SCAN_MINUTES` | 10 | How often (work hours) the newest surveys are scanned for stale statuses |
+| `DIAG_STATUS_CHECK` | `0` | `1` logs a `[DIAG]` line for every status check |
+| `REDIS_CONNECT_TIMEOUT`, `REDIS_SOCKET_TIMEOUT`, `REDIS_HEALTH_CHECK_INTERVAL` | 5, 5, 30 | Redis connection settings |
+
+Start command (in `render.yaml`): `gunicorn app_dash_simple:server --workers 1 --threads 8 --timeout 120`.
+Keep **one worker**: the survey list, status queue and change tracker live in process memory.
+
+## Worker configuration (`.env` next to `vps_worker.py`, or `WORKER_ENV_FILE`)
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `CULTUREINDEX_EMAIL`, `CULTUREINDEX_PASSWORD` | required | Culture Index login |
+| `JAZZHR_API_KEY` | required | Uploads |
+| `REDIS_URL` | required | Shared state |
+| `KEY_PREFIX` | empty | Must match the website |
+| `CLIENT_ID` | `A89F5B0000` | Culture Index client account |
+| `WORKER_JAZZHR_CALLS_PER_MINUTE` | 15 | JazzHR budget for uploads |
+| `SIZE_LOOKUP_NEWEST`, `SIZE_LOOKUPS_PER_RUN`, `SIZE_REFRESH_DAYS` | 300, 50, 7 | Report size lookups for the newest surveys |
+| `PDF_FETCH_TIMEOUT` | 5 | Report size lookup timeout (seconds) |
+| `ALLOWED_PDF_DOMAINS` | empty | Extra report hosts for the download allowlist |
+
+Cron (the VPS runs on Central time):
+
+```
+*/30 7-18 * * 1-5   cd /path/to/Culture_Index_tool && venv/bin/python vps_worker.py export
+0 */3 * * *         cd /path/to/Culture_Index_tool && venv/bin/python vps_worker.py export
+*/2 7-18 * * 1-5    cd /path/to/Culture_Index_tool && venv/bin/python vps_worker.py uploads
 ```
 
-## Project Structure
+Overlapping runs of the same job skip themselves. The worker never writes
+downloaded data to disk; its only file output is `worker.log` (capped at about 2 MB).
 
-```
-├── app.py                      # Main Dash application
-├── auth.py                     # Authentication logic
-├── login_layout.py             # Login page layout
-├── cultureindex_client_1.py     # Culture Index API client
-├── check_jazzhr_uploads.py     # JazzHR API integration
-├── cache_storage_1.py           # Caching layer (Redis/File)
-├── surveys_fetch.py             # Survey data utilities
-└── assets/
-    ├── custom.css              # Main stylesheet
-    └── login.css               # Login page styles
-```
+## Maintenance
 
-## Key Components
+| Command | Where | What it does |
+|---------|-------|--------------|
+| `python cultureindex_client.py` | VPS | Checks whether this machine can log in to Culture Index |
+| `python vps_worker.py export` | VPS | Exports surveys now |
+| `python rebuild_cache.py` | VPS | Rechecks every survey against JazzHR and rewrites the status store (asks: clear or resume) |
 
-- **SimpleSurveyService**: Manages survey data fetching and caching from Culture Index
-- **SimpleJazzHRService**: Handles JazzHR API interactions and PDF uploads
-- **BackgroundJazzHRChecker**: Background worker for checking survey upload status
-- **AuthManager**: User authentication and session management
-
-## Usage
-
-1. **Login**: Access the application and authenticate with credentials
-2. **Search**: Use the search bar to find surveys by name
-3. **View Status**: Survey cards display JazzHR upload status
-4. **Upload**: Click "Upload" on individual surveys or select multiple and use "Upload Selected"
-5. **Refresh**: Use "Refresh CI" to reload surveys or "Refresh JazzHR" to clear status cache
-
-## Development Notes
-
-- The application uses Dash callbacks for real-time updates
-- Background workers run in separate threads to avoid blocking the UI
-- Rate limiting is implemented for JazzHR API calls
-- Caching reduces API calls and improves performance
-- Health check endpoints available at `/health`, `/health/ready`, `/health/live`
-
-## Troubleshooting
-
-- **Redis Connection Issues**: Set `CACHE_BACKEND=file` to use file-based caching
-- **Upload Failures**: Check JazzHR API key and applicant matching logic
-- **Slow Performance**: Adjust `MAX_WORKERS` and `POLL_INTERVAL_MS` in `.env`
-
+`rebuild_cache.py` writes to whatever `REDIS_URL` and `KEY_PREFIX` point at.

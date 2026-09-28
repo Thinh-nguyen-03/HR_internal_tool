@@ -4,27 +4,10 @@ services:
     runtime: python
     plan: starter
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app_dash_simple:server --bind 0.0.0.0:$PORT --workers 2 --threads 4 --timeout 120 --access-logfile /dev/null --log-level warning
+    # One worker only: the survey list, status queue and change tracker live in process memory.
+    startCommand: gunicorn app_dash_simple:server --bind 0.0.0.0:$PORT --workers 1 --threads 8 --timeout 120 --access-logfile /dev/null --log-level warning
     envVars:
       - key: PYTHON_VERSION
         value: "3.11.9"
-      - key: BACKGROUND_JOB_SECRET
-        generateValue: true
-      - key: CACHE_BACKEND
-        value: redis
-
-  - type: cron
-    name: survey-sync-hourly
-    runtime: python
-    plan: starter
-    schedule: "0 * * * *"
-    buildCommand: pip install -r requirements.txt
-    startCommand: python trigger_background_refresh.py
-    envVars:
-      - key: APP_URL
+      - key: REDIS_URL
         sync: false
-      - key: BACKGROUND_JOB_SECRET
-        fromService:
-          name: culture-index-hr-tool
-          type: web
-          envVarKey: BACKGROUND_JOB_SECRET

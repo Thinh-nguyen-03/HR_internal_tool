@@ -355,8 +355,9 @@ body {
     min-height: 0 !important;
 }
 
-/* Hide label text but show checkbox */
-.survey-checkbox-overlay label > *:not(input) {
+/* Hide label text but show checkbox (Dash 4 wraps the input in a span) */
+.survey-checkbox-overlay label > *:not(input):not(.dash-options-list-option-wrapper),
+.survey-checkbox-overlay .dash-options-list-option-text {
     display: none !important;
 }
 
