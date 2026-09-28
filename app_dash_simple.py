@@ -258,7 +258,9 @@ class SnapshotWatcher:
                 list_changed = True
                 log(f"Survey snapshot loaded: {len(surveys)} surveys (changed {meta.get('changed_at')})", "WARN")
         elif meta:
-            survey_store.update_meta(meta)
+            if meta.get('checked_at') != survey_store.meta.get('checked_at'):
+                survey_store.update_meta(meta)
+                tracker.mark_all()   # refresh the "last checked" line on open pages
 
         notifications.set(ss.parse_json(notification_raw))
 
