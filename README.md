@@ -8,8 +8,9 @@ It runs in two parts, because Culture Index blocks Render's IP:
 
 - **Website (Render):** `app_dash_simple.py`. Login, survey list, JazzHR status
   checks, upload requests. Never contacts Culture Index.
-- **Worker (SEnergy VPS, cron):** `vps_worker.py`. Exports the survey list from
-  Culture Index and performs the uploads. Outbound connections only.
+- **Worker (SEnergy VPS, systemd service `hr-worker`):** `vps_worker.py serve`.
+  Exports the survey list from Culture Index and performs the uploads, picking up
+  requests within about a second. Outbound connections only.
 
 They share state through Upstash Redis. Architecture and known issues:
 [CODEBASE_DOCUMENTATION.md](CODEBASE_DOCUMENTATION.md).
@@ -42,7 +43,7 @@ pip install -r requirements.txt
 | `JAZZHR_CALLS_PER_MINUTE` | 60 | JazzHR budget for this app (JazzHR allows 80; the worker uses 15) |
 | `BACKGROUND_CALLS_PER_MINUTE` | 35 | Ceiling for background checks inside that budget |
 | `UI_POLL_INTERVAL_MS` | 3000 | How often a browser tab asks this app for changes (no Redis cost) |
-| `SNAPSHOT_POLL_SECONDS`, `SNAPSHOT_POLL_SECONDS_OFF_HOURS` | 60, 300 | How often the app reads the worker's state from Redis |
+| `FALLBACK_POLL_SECONDS`, `ACTIVE_POLL_SECONDS` | 300, 20 | Safety-net reads of the worker's state (the worker normally announces changes over pub/sub); the shorter one applies while a refresh or upload is in progress |
 | `BACKGROUND_SCAN_MINUTES` | 10 | How often (work hours) the newest surveys are scanned for stale statuses |
 | `DIAG_STATUS_CHECK` | `0` | `1` logs a `[DIAG]` line for every status check |
 | `REDIS_CONNECT_TIMEOUT`, `REDIS_SOCKET_TIMEOUT`, `REDIS_HEALTH_CHECK_INTERVAL` | 5, 5, 30 | Redis connection settings |
@@ -64,23 +65,45 @@ Keep **one worker**: the survey list, status queue and change tracker live in pr
 | `PDF_FETCH_TIMEOUT` | 5 | Report size lookup timeout (seconds) |
 | `ALLOWED_PDF_DOMAINS` | empty | Extra report hosts for the download allowlist |
 
-Cron (the VPS runs on Central time):
+Service (`/etc/systemd/system/hr-worker.service`):
 
 ```
-*/30 7-18 * * 1-5   cd /path/to/Culture_Index_tool && venv/bin/python vps_worker.py export
-0 */3 * * *         cd /path/to/Culture_Index_tool && venv/bin/python vps_worker.py export
-*/2 7-18 * * 1-5    cd /path/to/Culture_Index_tool && venv/bin/python vps_worker.py uploads
+[Unit]
+Description=HR tool VPS worker (Culture Index export + JazzHR uploads)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=senergyadmin
+WorkingDirectory=/home/senergyadmin/hr_worker
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/home/senergyadmin/hr_worker/venv/bin/python vps_worker.py serve
+Restart=always
+RestartSec=10
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target
 ```
 
-Overlapping runs of the same job skip themselves. The worker never writes
-downloaded data to disk; its only file output is `worker.log` (capped at about 2 MB).
+`sudo systemctl enable --now hr-worker`, `systemctl status hr-worker`,
+`sudo systemctl restart hr-worker` after updating the code.
+
+The service waits on the refresh and upload queues, runs the scheduled exports
+(every 30 minutes on weekdays 7:00–18:59 Central, every 3 hours otherwise),
+retries once when Culture Index answers 504, and writes a heartbeat every
+5 minutes. Once a minute (every 20 seconds right after a start) it also picks up
+any request the queue failed to deliver. The worker never writes downloaded data
+to disk; its only file output is `worker.log` (capped at about 2 MB).
 
 ## Maintenance
 
 | Command | Where | What it does |
 |---------|-------|--------------|
 | `python cultureindex_client.py` | VPS | Checks whether this machine can log in to Culture Index |
-| `python vps_worker.py export` | VPS | Exports surveys now |
+| `python vps_worker.py export` | VPS | Exports surveys now (the service keeps running) |
+| `journalctl -u hr-worker -n 50` or `tail ~/hr_worker/worker.log` | VPS | Worker log |
 | `python rebuild_cache.py` | VPS | Rechecks every survey against JazzHR and rewrites the status store (asks: clear or resume) |
 
 `rebuild_cache.py` writes to whatever `REDIS_URL` and `KEY_PREFIX` point at.

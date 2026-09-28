@@ -1,22 +1,26 @@
 """VPS worker: does all Culture Index work and hands the results to the Render app.
 
-Render's IP is blocked by Culture Index, so this runs from the VPS on cron. It
-only makes outbound connections (Culture Index, JazzHR, Upstash Redis) and
-accepts none. Downloaded CSVs and PDFs live in memory only and are dropped as
-soon as they have been used; nothing is written to disk except this worker's
-capped log.
+Render's IP is blocked by Culture Index, so this runs on the VPS. It only makes
+outbound connections (Culture Index, JazzHR, Upstash Redis) and accepts none.
+Downloaded CSVs and PDFs live in memory only and are dropped as soon as they
+have been used; nothing is written to disk except this worker's capped log.
 
-    python vps_worker.py export     Export surveys and publish the snapshot (only writes if it changed)
-    python vps_worker.py uploads    Process queued uploads, and run an export if one was requested
+    python vps_worker.py serve      Always-on mode (the systemd service): picks up refresh
+                                    and upload requests within about a second, runs the
+                                    scheduled exports and writes a heartbeat
+    python vps_worker.py export     One export now (manual use)
+    python vps_worker.py uploads    Process the upload queue once (manual use)
 
 Configuration comes from the environment or a .env next to this file (override
-with WORKER_ENV_FILE). See README.md for the cron lines.
+with WORKER_ENV_FILE). See README.md for the service setup.
 """
 import fcntl
 import json
 import logging
 import os
+import signal
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from typing import Dict, List, Optional
@@ -30,6 +34,8 @@ load_dotenv(os.getenv('WORKER_ENV_FILE') or os.path.join(HERE, '.env'))
 import shared_state as ss  # noqa: E402
 from cache_storage import StatusStore, parse_timestamp  # noqa: E402
 from check_jazzhr_uploads import JazzHRUploadChecker, RateLimiter  # noqa: E402
+import requests  # noqa: E402
+from zoneinfo import ZoneInfo  # noqa: E402
 from cultureindex_client import CultureIndexClient, CultureIndexAuthError, fetch_pdf_sizes, parse_surveys_csv  # noqa: E402
 
 CLIENT_ID = os.getenv('CLIENT_ID', 'A89F5B0000')
@@ -39,6 +45,8 @@ SIZE_REFRESH_DAYS = int(os.getenv('SIZE_REFRESH_DAYS', '7'))
 PDF_FETCH_TIMEOUT = int(os.getenv('PDF_FETCH_TIMEOUT', '5'))
 WORKER_JAZZHR_CALLS_PER_MINUTE = int(os.getenv('WORKER_JAZZHR_CALLS_PER_MINUTE', '15'))
 UPLOAD_ATTEMPTS = 2
+EXPORT_RETRY_DELAY = 20
+CENTRAL_TZ = ZoneInfo("America/Chicago")
 
 NON_RETRYABLE_ERRORS = (
     "401", "403", "404", "apikey not set", "invalid api key",
@@ -129,14 +137,33 @@ def _carry_forward_sizes(surveys: List[Dict], previous: List[Dict]) -> None:
     log.info(f"Report sizes: looked up {len(to_look_up)}, found {len(sizes)}")
 
 
-def run_export(client, reason: str) -> None:
+def _export_csv_with_retry(on_retry=None) -> str:
+    """Log in and export, retrying once after a gateway error or timeout: Culture
+    Index's export endpoint regularly answers 504 when it is busy."""
+    for attempt in (1, 2):
+        try:
+            return ci_login().export_surveys_csv(client_id=CLIENT_ID)
+        except (requests.Timeout, requests.ConnectionError, requests.HTTPError, CultureIndexAuthError) as e:
+            status = getattr(getattr(e, 'response', None), 'status_code', None)
+            transient = isinstance(e, (requests.Timeout, requests.ConnectionError)) or status in (502, 503, 504)
+            if attempt == 2 or not transient:
+                raise
+            log.warning(f"Culture Index export failed ({e}); retrying in {EXPORT_RETRY_DELAY}s")
+            if on_retry:
+                on_retry()
+            time.sleep(EXPORT_RETRY_DELAY)
+    raise RuntimeError("unreachable")
+
+
+def run_export(client, reason: str, on_retry=None) -> Optional[Dict]:
+    """Export and publish the snapshot. Returns {count, changed, new_count}, or None
+    if another export was already running."""
     with RunLock("export") as acquired:
         if not acquired:
             log.info("Export already running; skipped")
-            return
+            return None
 
-        ci = ci_login()
-        csv_text = ci.export_surveys_csv(client_id=CLIENT_ID)
+        csv_text = _export_csv_with_retry(on_retry)
         surveys = parse_surveys_csv(csv_text)
         del csv_text
         if not surveys:
@@ -146,8 +173,8 @@ def run_export(client, reason: str) -> None:
         surveys.sort(key=_survey_sort_key, reverse=True)
 
         # One MGET for everything the export needs to compare against.
-        meta_raw, prev_payload, known_raw, notification_raw, refresh_flag = client.mget(
-            ss.SNAPSHOT_META_KEY, ss.SNAPSHOT_KEY, ss.KNOWN_IDS_KEY, ss.NOTIFICATION_KEY, ss.REFRESH_REQUEST_KEY
+        meta_raw, prev_payload, known_raw, notification_raw = client.mget(
+            ss.SNAPSHOT_META_KEY, ss.SNAPSHOT_KEY, ss.KNOWN_IDS_KEY, ss.NOTIFICATION_KEY
         )
         previous = ss.decode_snapshot(prev_payload) if prev_payload else []
         del prev_payload
@@ -157,10 +184,12 @@ def run_export(client, reason: str) -> None:
         payload, content_hash = ss.encode_snapshot(surveys)
         meta = ss.parse_json(meta_raw) or {}
         now = ss.utc_now_iso()
+        truly_new: List[str] = []
 
         if meta.get('hash') == content_hash:
             meta['checked_at'] = now
             client.set(ss.SNAPSHOT_META_KEY, json.dumps(meta))
+            changed = False
             log.info(f"Export ({reason}): {len(surveys)} surveys, unchanged")
         else:
             new_ids = [s['surveyId'] for s in surveys]
@@ -184,11 +213,37 @@ def run_export(client, reason: str) -> None:
                     "timestamp": now, "acknowledged": False,
                 }), ex=ss.NOTIFICATION_TTL)
             pipe.execute()
+            changed = True
             log.info(f"Export ({reason}): {len(surveys)} surveys, snapshot updated, {len(truly_new)} new")
         del payload
 
-        if refresh_flag:
-            client.delete(ss.REFRESH_REQUEST_KEY)
+        ss.publish_event(client, "snapshot", changed=changed, new_count=len(truly_new))
+        return {"count": len(surveys), "changed": changed, "new_count": len(truly_new)}
+
+
+def handle_refresh(client) -> None:
+    """Run a requested export, recording each stage so the website can show progress."""
+    status = ss.parse_json(client.get(ss.REFRESH_STATUS_KEY)) or {}
+    if status.get("state") != ss.REFRESH_REQUESTED:
+        # Already handled (for example by the reconcile sweep); don't export twice.
+        return
+    status = ss.set_refresh_status(client, dict(status, state=ss.REFRESH_RUNNING, started_at=ss.utc_now_iso(), attempt=1))
+
+    def on_retry():
+        nonlocal status
+        status = ss.set_refresh_status(client, dict(status, attempt=2))
+
+    try:
+        result = run_export(client, reason="requested", on_retry=on_retry)
+    except Exception as e:
+        ss.set_refresh_status(client, dict(status, state=ss.REFRESH_FAILED, finished_at=ss.utc_now_iso(), error=str(e)[:200]))
+        log.error(f"Requested export failed: {e}")
+        return
+    if result is None:
+        ss.set_refresh_status(client, dict(status, state=ss.REFRESH_FAILED, finished_at=ss.utc_now_iso(),
+                                           error="Another export was already running; try again in a minute"))
+        return
+    ss.set_refresh_status(client, dict(status, state=ss.REFRESH_DONE, finished_at=ss.utc_now_iso(), **result))
 
 
 def _is_retryable(error: str) -> bool:
@@ -227,7 +282,10 @@ class Uploader:
 
     def process(self, survey_id: str) -> None:
         job = ss.parse_json(self.client.get(ss.job_key(survey_id)))
-        if not job or job.get('state') != ss.JOB_QUEUED:
+        if not job:
+            self.client.srem(ss.UPLOAD_PENDING_KEY, survey_id)
+            return
+        if job.get('state') != ss.JOB_QUEUED:
             return
         first, last, pdf_url = job.get('first_name', ''), job.get('last_name', ''), job.get('pdf_url')
         job = ss.set_job_state(self.client, survey_id, job, ss.JOB_UPLOADING)
@@ -289,45 +347,190 @@ class Uploader:
 
 
 def run_uploads(client) -> None:
+    """Process the upload queue once (manual use; the service does this continuously)."""
     with RunLock("uploads") as acquired:
         if not acquired:
             log.info("Uploads already running; skipped")
             return
-
-        pipe = client.pipeline(transaction=False)
-        pipe.get(ss.REFRESH_REQUEST_KEY)
-        pipe.rpop(ss.UPLOAD_QUEUE_KEY)
-        refresh_flag, queued = pipe.execute()
-
-        if refresh_flag:
-            try:
-                run_export(client, reason="requested")
-            except Exception as e:
-                log.error(f"Requested export failed: {e}")
-
         uploader = None
         processed = 0
+        queued = client.rpop(ss.UPLOAD_QUEUE_KEY)
         while queued:
-            survey_id = (ss.parse_json(queued) or {}).get('survey_id')
-            if survey_id:
-                uploader = uploader or Uploader(client)
-                try:
-                    uploader.process(str(survey_id))
-                except Exception as e:
-                    log.error(f"Upload {survey_id}: unexpected error: {e}")
-                processed += 1
+            uploader = uploader or Uploader(client)
+            processed += _process_queued(uploader, queued)
             queued = client.rpop(ss.UPLOAD_QUEUE_KEY)
-
         if processed:
             client.incr(ss.WORKER_VERSION_KEY)
             log.info(f"Processed {processed} upload job(s)")
 
 
+def _process_queued(uploader: "Uploader", queued: str) -> int:
+    survey_id = (ss.parse_json(queued) or {}).get('survey_id')
+    if not survey_id:
+        return 0
+    try:
+        uploader.process(str(survey_id))
+    except Exception as e:
+        log.error(f"Upload {survey_id}: unexpected error: {e}")
+    return 1
+
+
+def next_scheduled_export(after: datetime) -> datetime:
+    """Every 30 minutes on weekdays 7:00-18:59 Central, every 3 hours otherwise."""
+    local = after.astimezone(CENTRAL_TZ).replace(second=0, microsecond=0)
+    candidate = local + timedelta(minutes=1)
+    while True:
+        work_hours = candidate.weekday() < 5 and 7 <= candidate.hour < 19
+        if (work_hours and candidate.minute in (0, 30)) or (candidate.minute == 0 and candidate.hour % 3 == 0):
+            return candidate.astimezone(timezone.utc)
+        candidate += timedelta(minutes=1)
+
+
+RECONCILE_SECONDS = 60
+RECONCILE_SECONDS_AFTER_START = 20   # lost requests cluster in the minute after a restart
+RECONCILE_MIN_AGE = 15
+
+
+def _age_seconds(iso: Optional[str]) -> float:
+    try:
+        return (datetime.now(timezone.utc) - datetime.fromisoformat(iso)).total_seconds()
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def reconcile(client, uploader: "Uploader") -> int:
+    """Pick up requests the queue failed to deliver.
+
+    Upstash keeps a disconnected client's blocking pop registered until its
+    timeout, so a request made just after a worker restart or network drop can be
+    handed to the dead connection and lost. The refresh status and upload job
+    records are durable, so anything still waiting after 15 seconds is handled
+    here. Returns the number of upload jobs processed.
+    """
+    pipe = client.pipeline(transaction=False)
+    pipe.get(ss.REFRESH_STATUS_KEY)
+    pipe.smembers(ss.UPLOAD_PENDING_KEY)
+    status_raw, pending = pipe.execute()
+
+    status = ss.parse_json(status_raw) or {}
+    if status.get("state") == ss.REFRESH_REQUESTED and _age_seconds(status.get("requested_at")) > RECONCILE_MIN_AGE:
+        log.warning("Picking up a survey refresh the queue didn't deliver")
+        client.delete(ss.REFRESH_QUEUE_KEY)
+        handle_refresh(client)
+
+    processed = 0
+    for survey_id in sorted(pending or []):
+        job = ss.parse_json(client.get(ss.job_key(survey_id)))
+        if not job:
+            client.srem(ss.UPLOAD_PENDING_KEY, survey_id)
+        elif job.get("state") == ss.JOB_QUEUED and _age_seconds(job.get("requested_at")) > RECONCILE_MIN_AGE:
+            log.warning(f"Picking up upload {survey_id} the queue didn't deliver")
+            processed += _process_queued(uploader, json.dumps({"survey_id": survey_id}))
+    return processed
+
+
+class _StopWaiting(BaseException):
+    """Raised by the signal handler to end an idle queue wait immediately."""
+
+
+def serve() -> int:
+    """Always-on mode. Waits on the refresh and upload queues (oldest request first),
+    runs scheduled exports and writes a heartbeat. On SIGTERM it stops at once if
+    idle, or after the current job."""
+    stopping = False
+    waiting = False
+
+    def stop(signum, frame):
+        nonlocal stopping
+        stopping = True
+        if waiting:
+            raise _StopWaiting()
+        log.info("Stop requested; finishing the current job")
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+
+    with RunLock("serve") as acquired:
+        if not acquired:
+            log.error("Another worker service is already running")
+            return 1
+        log.info("Worker service started")
+        client = None
+        uploader = None
+        next_export = next_scheduled_export(datetime.now(timezone.utc))
+        last_heartbeat = 0.0
+        last_reconcile = 0.0
+        started = time.time()
+
+        while not stopping:
+            try:
+                if client is None:
+                    # The blocking pop waits up to 60 s, so the socket must allow longer.
+                    client = ss.connect(socket_timeout=90)
+                    uploader = Uploader(client)
+
+                now = time.time()
+                if now - last_heartbeat >= ss.HEARTBEAT_INTERVAL:
+                    client.set(ss.HEARTBEAT_KEY, ss.utc_now_iso(), ex=ss.HEARTBEAT_TTL)
+                    last_heartbeat = now
+
+                reconcile_every = RECONCILE_SECONDS_AFTER_START if time.time() - started < 120 else RECONCILE_SECONDS
+                if time.time() - last_reconcile >= reconcile_every:
+                    last_reconcile = time.time()
+                    if reconcile(client, uploader):
+                        client.incr(ss.WORKER_VERSION_KEY)
+
+                if datetime.now(timezone.utc) >= next_export:
+                    next_export = next_scheduled_export(datetime.now(timezone.utc))
+                    try:
+                        run_export(client, reason="scheduled")
+                    except Exception as e:
+                        log.error(f"Scheduled export failed: {e}")
+                    continue
+
+                wait = min(60, (next_export - datetime.now(timezone.utc)).total_seconds(),
+                           ss.HEARTBEAT_INTERVAL - (time.time() - last_heartbeat),
+                           reconcile_every - (time.time() - last_reconcile))
+                waiting = True
+                try:
+                    item = client.brpop([ss.REFRESH_QUEUE_KEY, ss.UPLOAD_QUEUE_KEY], timeout=max(1, int(wait)))
+                finally:
+                    waiting = False
+                if not item:
+                    continue
+
+                queue, value = item
+                if queue == ss.REFRESH_QUEUE_KEY:
+                    client.delete(ss.REFRESH_QUEUE_KEY)   # several clicks mean one refresh
+                    handle_refresh(client)
+                else:
+                    processed = _process_queued(uploader, value)
+                    while not stopping:
+                        queued = client.rpop(ss.UPLOAD_QUEUE_KEY)
+                        if not queued:
+                            break
+                        processed += _process_queued(uploader, queued)
+                    if processed:
+                        client.incr(ss.WORKER_VERSION_KEY)
+                        log.info(f"Processed {processed} upload job(s)")
+            except _StopWaiting:
+                break
+            except Exception as e:
+                log.error(f"Worker loop error: {e}; reconnecting in 10s")
+                client = None
+                time.sleep(10)
+
+        log.info("Worker service stopped")
+        return 0
+
+
 def main() -> int:
-    if len(sys.argv) != 2 or sys.argv[1] not in ('export', 'uploads'):
+    if len(sys.argv) != 2 or sys.argv[1] not in ('serve', 'export', 'uploads'):
         print(__doc__)
         return 2
     setup_logging()
+    if sys.argv[1] == 'serve':
+        return serve()
     try:
         client = ss.connect()
         if sys.argv[1] == 'export':

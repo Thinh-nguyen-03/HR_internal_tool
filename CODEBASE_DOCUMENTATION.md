@@ -31,16 +31,16 @@ Culture Index's firewall (Azure Front Door) returns HTTP 403 to Render for every
 request, including report PDFs, while the SEnergy VPS is allowed. So the work is split:
 
 ```
-VPS worker (cron, outbound only)          Upstash Redis                     Render website
-  export: log in to Culture Index  ─────> surveys:snapshot + surveys:meta ──> SnapshotWatcher (1 MGET/min)
-          export CSV, sizes                known_survey_ids                    survey list in memory
+VPS worker service (outbound only)        Upstash Redis                     Render website
+  waits on both queues (BRPOP)     <───── surveys:refresh_queue        <──── "Refresh Surveys" button
+                                   <───── uploads:queue, uploads:job:{id} <── Upload buttons
+  export: log in to Culture Index  ─────> surveys:snapshot + surveys:meta ──> survey list in memory
+          export CSV, sizes                surveys:refresh_status  ───────>  progress card
                                            new_surveys_notification ───────>  "New Surveys" badge
-  uploads: take queued jobs        <───── uploads:queue, uploads:job:{id} <── Upload buttons
-           re-check JazzHR,
-           fetch PDF, upload       ─────> jazzhr_status:{id} = UPLOADED
-                                           uploads:job:{id} = done/failed
-                                           worker:version (INCR)   ───────>  open pages re-render
-  (reads surveys:refresh_requested) <──── "Refresh Surveys" button
+  uploads: re-check JazzHR,        ─────> jazzhr_status:{id} = UPLOADED
+           fetch PDF, upload               uploads:job:{id} = done/failed ─>  card updates
+  heartbeat every 5 min            ─────> worker:heartbeat          ───────>  "worker isn't responding"
+  every change                     ─────> PUBLISH hr:events         ───────>  EventListener (instant)
                                            jazzhr_status:{id}  <───────────  StatusWorker (JazzHR checks)
 ```
 
@@ -53,7 +53,8 @@ Neither side connects to the other. The VPS accepts no incoming connections.
 | `app_dash_simple.py` | Render | Entry point (`server`). Survey store, snapshot watcher, routes, login gate, layout, callbacks. |
 | `status_worker.py` | Render | The single queue for all JazzHR status checks (priorities, de-duplication, background ceiling). |
 | `ui_state.py` | Render | In-memory change tracker and badge state that browser tabs poll; `log()`. |
-| `vps_worker.py` | VPS | `export` and `uploads` modes, run by cron. |
+| `vps_worker.py` | VPS | `serve` (the systemd service), plus `export` and `uploads` for manual use. |
+| `assets/refresh_progress.js` | Render | Browser-side renderer for the refresh progress card. |
 | `rebuild_cache.py` | VPS | Manual full recheck of every survey. |
 | `shared_state.py` | both | Every Redis key, the snapshot format, the job queue helpers, `KEY_PREFIX`. |
 | `cache_storage.py` | both | `StatusStore`: JazzHR statuses in Redis, kept indefinitely with their check time. |
@@ -67,14 +68,24 @@ Neither side connects to the other. The VPS accepts no incoming connections.
 
 ## 5. The worker (`vps_worker.py`)
 
-Cron schedule (Central time): `export` every 30 min in work hours (Mon–Fri
-7:00–18:59) and every 3 hours otherwise; `uploads` every 2 min in work hours.
-A file lock makes an overlapping run of the same mode skip itself.
+Runs as the systemd service `hr-worker` (`vps_worker.py serve`). It waits on the
+refresh and upload queues with a blocking pop, so a request is picked up within
+about a second, around the clock. It also runs the scheduled exports (every
+30 minutes Mon–Fri 7:00–18:59 Central, every 3 hours otherwise) and writes
+`worker:heartbeat` every 5 minutes. On SIGTERM it stops at once if idle, or after
+the current job. A file lock prevents two services.
+
+**Lost requests:** Upstash keeps a disconnected client's blocking pop registered
+until its timeout, so a request made just after a worker restart can be handed
+to the dead connection. The refresh status and the `uploads:pending` set are
+durable, so a reconcile sweep (every 60 s, every 20 s in the first 2 minutes)
+handles anything still waiting after 15 s. All handling is idempotent.
 
 **export**
 1. Logs in, exports the CSV, parses it (in memory; the CSV is dropped at once).
-2. One MGET reads the previous snapshot, its meta, the known-ID baseline, the
-   pending notification and the refresh flag.
+2. One MGET reads the previous snapshot, its meta, the known-ID baseline and
+   the pending notification. The login and export are retried once after a
+   504, other gateway error or timeout (20 s pause).
 3. Report sizes are carried forward from the previous snapshot; only new
    surveys and sizes older than 7 days among the newest 300 are looked up
    (at most 50 per run, only real PDF responses count).
@@ -82,17 +93,22 @@ A file lock makes an overlapping run of the same mode skip itself.
    Otherwise one transaction writes the snapshot, meta and known IDs, and adds
    genuinely new IDs to the notification (merged with any unclicked one; the
    first ever run records a baseline silently).
-5. Clears the refresh flag if one was set.
+5. Publishes a `snapshot` event.
+
+**refresh** (from the "Refresh Surveys" button): the status goes `requested` →
+`running` (with `attempt: 2` during a retry) → `done` (with `new_count`) or
+`failed` (with the error); every step is published as a `refresh` event.
 
 **uploads**
-1. One pipeline reads the refresh flag and pops the first job. A set flag runs an export first.
+1. Each job is popped from `uploads:queue` (oldest first).
 2. For each job: marks it `uploading`; re-checks JazzHR (the page may be stale,
    and this picks the current target record); if already uploaded, marks it done
    without uploading; otherwise fetches the PDF (portal endpoint, fallback to the
    CSV report URL, both PDF-checked), uploads it, writes an `UPLOADED` status
    directly, and marks the job done or failed. PDFs are never kept, not even
    for the one retry.
-3. Increments `worker:version` if any job was processed.
+3. Every job state change is published as an `upload` event; `worker:version`
+   is incremented after a batch as a fallback signal.
 
 ## 6. The website (`app_dash_simple.py`)
 
@@ -101,10 +117,14 @@ A file lock makes an overlapping run of the same mode skip itself.
   the app preloaded, so the import happens in the parent and the serving worker
   is a fork; threads started at import would stay in the parent. If the list is
   still empty, a page request or `/health` loads it directly.
-- **Survey list:** `SnapshotWatcher` reads `surveys:meta`, `worker:version` and
-  the notification in one MGET every minute in work hours, every 5 minutes
-  otherwise, and every 15 seconds for 15 minutes after an upload is queued. It
-  downloads the snapshot only when the hash changes. New surveys don't reshuffle
+- **Instant updates:** `EventListener` subscribes to `hr:events`. Refresh
+  progress goes straight to the progress card, an upload event re-renders that
+  card, and a snapshot event wakes the watcher to load the new list.
+- **Survey list:** `SnapshotWatcher` reads the snapshot meta, `worker:version`,
+  the notification, the refresh status and the heartbeat in one MGET. Events
+  wake it at once; otherwise it runs every 5 minutes as a safety net, or every
+  20 seconds while a refresh or upload is in progress. It downloads the snapshot
+  only when the hash changes. New surveys don't reshuffle
   an open page; the badge shows them and clicking it shows page 1.
 - **Rendering:** every render reads the page's statuses and job records (two
   MGETs) and draws complete cards, including Upload buttons and checkboxes.
@@ -126,6 +146,12 @@ A file lock makes an overlapping run of the same mode skip itself.
   survey that has never been checked.
 - **Uploads** are queued with `shared_state.enqueue_upload` (one job per survey
   at a time). Cards show Queued, Uploading, then the worker's result.
+- **Refresh progress card:** "Refresh Surveys" queues a refresh (a click while
+  one is running just shows it). The card shows Requested → Fetching → Updated
+  with an elapsed timer and a stage-based bar (Culture Index reports no real
+  progress), the retry message, and a warning if the worker's heartbeat is older
+  than 11 minutes. It is animated in the browser (`assets/refresh_progress.js`)
+  and hides itself 12 s after success or 45 s after a failure.
 
 ## 7. Report match rules (`check_pdf_match`)
 
@@ -154,8 +180,12 @@ exact name are checked; uploads go to the newest.
 | `surveys:snapshot`, `surveys:meta` | worker | permanent |
 | `known_survey_ids` | worker | permanent |
 | `new_surveys_notification` | worker (cleared by badge click) | 24 h |
-| `surveys:refresh_requested` | website | until the worker runs, max 1 h |
+| `surveys:refresh_queue` | website push, worker pop | |
+| `surveys:refresh_status` | both | 24 h |
 | `uploads:queue` | website push, worker pop | |
+| `uploads:pending` | website add, worker remove | until the job finishes |
+| `worker:heartbeat` | worker | 1 h (rewritten every 5 min) |
+| `hr:events` | worker publishes, website subscribes | pub/sub channel |
 | `uploads:job:{surveyId}` | both | 24 h while active, 1 h after finishing |
 | `worker:version` | worker | permanent |
 | `jazzhr_status:{surveyId}` | both | permanent (freshness from its timestamp) |
@@ -165,9 +195,10 @@ All keys take the `KEY_PREFIX` prefix. Legacy keys from the previous version
 (`app:*`, `pdf_sizes:*`, `upload_lock:*`) are no longer used and can be deleted.
 
 Upstash free plan: 500K commands/month, 10 MB per request, 256 MB storage. The
-snapshot is about 600 KB (compressed, base64). Expected use is roughly
-30K/month for the worker and 30–60K/month for the website plus status writes;
-browser polling costs nothing.
+snapshot is about 600 KB (compressed, base64). Expected use: the worker's
+blocking pop (about 1 per minute), heartbeat and reconcile sweep come to roughly
+90K/month; the website's safety-net poll and pub/sub pings about 20K/month, plus
+status writes. Browser polling and the progress card cost nothing.
 
 ## 10. HTTP routes (website)
 
@@ -180,6 +211,18 @@ browser polling costs nothing.
 | `/_dash-update-component` | login, except the login callback | Every Dash callback |
 
 ## 11. Change history
+
+### 2026-09-28 (later): always-on worker, instant updates, progress card
+
+- The worker runs as the systemd service `hr-worker` instead of three cron
+  lines: requests are picked up within a second, around the clock.
+- The website receives the worker's pub/sub events; its Redis poll is now a
+  5-minute safety net.
+- "Refresh Surveys" shows a progress card; the "Working" loader was restyled to match.
+- One retry after a Culture Index 504 or timeout.
+- Reconcile sweep for requests lost to a dead blocking pop (found in testing:
+  Upstash hands a queued item to a just-disconnected client).
+- The service stops at once when idle (it used to wait out a 60-second pop).
 
 ### 2026-09-28: website/worker split and responsiveness
 
@@ -241,10 +284,9 @@ Pre-cleanup backup: `/home/senergyadmin/Culture_Index_tool_backup_20260925.tar.g
 
 ## 13. Cutover checklist
 
-1. **VPS worker:** a folder with this code, a Python 3.11 virtual environment
-   (`pip install -r requirements.txt`), and a `.env` with the worker settings
-   (README). Run `python vps_worker.py export` once by hand, then add the three
-   cron lines.
+1. **VPS worker:** a folder with this code, a Python 3.11+ virtual environment
+   (`pip install -r requirements.txt`), a `.env` with the worker settings (README),
+   and the `hr-worker` systemd service (README). Done 2026-09-28 in `~/hr_worker`.
 2. **Missing statuses:** the newest ~1,000 surveys have no production status
    (their old 2-hour entries expired after Render was blocked on 2026-09-25).
    They fill in as pages are viewed and through the background scan; to fill them

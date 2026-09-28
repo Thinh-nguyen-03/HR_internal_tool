@@ -16,7 +16,7 @@ from typing import Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 import dash
-from dash import Dash, html, dcc, Input, Output, State, callback, ctx, ALL
+from dash import Dash, html, dcc, Input, Output, State, callback, ctx, ALL, ClientsideFunction, clientside_callback
 from dotenv import load_dotenv
 from flask import redirect, request, jsonify
 from flask_login import current_user
@@ -31,7 +31,7 @@ from input_validation import sanitize_search_query, validate_page_number  # noqa
 from login_layout import create_login_layout  # noqa: E402
 from status_worker import StatusWorker, PRIORITY_BACKGROUND, PRIORITY_INTERACTIVE, PRIORITY_VISIBLE  # noqa: E402
 from survey_display import build_loading_result, build_error_result, build_empty_result, format_time_ago  # noqa: E402
-from ui_state import ChangeTracker, NotificationState, log  # noqa: E402
+from ui_state import ChangeTracker, NotificationState, RefreshState, log  # noqa: E402
 
 ITEMS_PER_PAGE = int(os.getenv('ITEMS_PER_PAGE', '15'))
 MAX_BATCH_UPLOAD = int(os.getenv('MAX_BATCH_UPLOAD', '15'))
@@ -41,9 +41,9 @@ JAZZHR_CACHE_HOURS = float(os.getenv('JAZZHR_CACHE_HOURS', '2'))
 JAZZHR_CALLS_PER_MINUTE = int(os.getenv('JAZZHR_CALLS_PER_MINUTE', '60'))
 BACKGROUND_CALLS_PER_MINUTE = int(os.getenv('BACKGROUND_CALLS_PER_MINUTE', '35'))
 POLL_INTERVAL_MS = int(os.getenv('UI_POLL_INTERVAL_MS', '3000'))
-SNAPSHOT_POLL_SECONDS = int(os.getenv('SNAPSHOT_POLL_SECONDS', '60'))
-SNAPSHOT_POLL_SECONDS_OFF_HOURS = int(os.getenv('SNAPSHOT_POLL_SECONDS_OFF_HOURS', '300'))
-UPLOAD_WATCH_SECONDS = int(os.getenv('UPLOAD_WATCH_SECONDS', '15'))
+# The worker announces changes over pub/sub; this poll is only the safety net.
+FALLBACK_POLL_SECONDS = int(os.getenv('FALLBACK_POLL_SECONDS', '300'))
+ACTIVE_POLL_SECONDS = int(os.getenv('ACTIVE_POLL_SECONDS', '20'))
 BACKGROUND_SCAN_MINUTES = int(os.getenv('BACKGROUND_SCAN_MINUTES', '10'))
 DIAG_STATUS_CHECK = os.getenv('DIAG_STATUS_CHECK', '0') == '1'
 
@@ -138,6 +138,7 @@ redis_client = ss.connect()
 status_store = StatusStore(redis_client, recent_threshold=RECENT_SURVEY_THRESHOLD, stale_hours=JAZZHR_CACHE_HOURS)
 tracker = ChangeTracker()
 notifications = NotificationState()
+refresh_state = RefreshState()
 survey_store = SurveyStore()
 recent_uploads = RecentUploads()
 
@@ -162,9 +163,10 @@ status_worker = StatusWorker(
 class SnapshotWatcher:
     """Mirrors the worker's shared state into this process.
 
-    One MGET per tick (snapshot meta, worker version, notification). It ticks
-    every minute in work hours, every 5 minutes otherwise, and every 15 seconds
-    while an upload queued here may still be in progress.
+    The worker announces changes over pub/sub (EventListener), which wakes this
+    watcher at once. On its own it ticks every 5 minutes as a safety net, or every
+    20 seconds while a refresh or an upload queued here is in progress. One MGET
+    per tick.
     """
 
     _UNREAD = object()   # distinct from None, which means the key doesn't exist yet
@@ -211,9 +213,9 @@ class SnapshotWatcher:
             log(f"Snapshot load from a page request failed: {e}", "ERROR")
 
     def _interval(self) -> int:
-        if recent_uploads.any_since(15 * 60):
-            return UPLOAD_WATCH_SECONDS
-        return SNAPSHOT_POLL_SECONDS if is_work_hours() else SNAPSHOT_POLL_SECONDS_OFF_HOURS
+        if refresh_state.is_active() or recent_uploads.any_since(15 * 60):
+            return ACTIVE_POLL_SECONDS
+        return FALLBACK_POLL_SECONDS
 
     def _loop(self) -> None:
         try:
@@ -234,9 +236,12 @@ class SnapshotWatcher:
         self.last_tick_at = datetime.now(timezone.utc).isoformat()
 
     def _tick(self) -> None:
-        meta_raw, worker_version, notification_raw = redis_client.mget(
-            ss.SNAPSHOT_META_KEY, ss.WORKER_VERSION_KEY, ss.NOTIFICATION_KEY
+        meta_raw, worker_version, notification_raw, refresh_raw, heartbeat = redis_client.mget(
+            ss.SNAPSHOT_META_KEY, ss.WORKER_VERSION_KEY, ss.NOTIFICATION_KEY,
+            ss.REFRESH_STATUS_KEY, ss.HEARTBEAT_KEY,
         )
+        refresh_state.set_status(ss.parse_json(refresh_raw))
+        refresh_state.set_heartbeat(heartbeat)
         meta = ss.parse_json(meta_raw)
         list_changed = False
 
@@ -278,6 +283,46 @@ class SnapshotWatcher:
 
 snapshot_watcher = SnapshotWatcher()
 
+
+class EventListener:
+    """Receives the worker's pub/sub events so progress, finished uploads and new
+    surveys show up within seconds. Missed events are covered by the watcher's poll."""
+
+    PING_SECONDS = 300   # detects a silently dropped connection; each ping is one Redis command
+
+    def start(self) -> None:
+        Thread(target=self._loop, daemon=True, name="EventListener").start()
+
+    def _loop(self) -> None:
+        while True:
+            try:
+                client = ss.connect(socket_timeout=None)
+                pubsub = client.pubsub(ignore_subscribe_messages=True)
+                pubsub.subscribe(ss.EVENTS_CHANNEL)
+                last_ping = time.monotonic()
+                while True:
+                    message = pubsub.get_message(timeout=30)
+                    if message and message.get("type") == "message":
+                        self._handle(ss.parse_json(message.get("data")) or {})
+                    if time.monotonic() - last_ping >= self.PING_SECONDS:
+                        pubsub.ping()
+                        last_ping = time.monotonic()
+            except Exception as e:
+                log(f"Event listener error: {e}; reconnecting in 10s", "ERROR")
+                time.sleep(10)
+
+    def _handle(self, event: Dict) -> None:
+        kind = event.get("type")
+        if kind == "refresh":
+            refresh_state.set_status(event.get("status"))
+        elif kind == "upload" and event.get("survey_id"):
+            tracker.mark_changed([event["survey_id"]])
+        elif kind == "snapshot":
+            snapshot_watcher.wake()
+
+
+event_listener = EventListener()
+
 _background_lock = Lock()
 _background_pid: Optional[int] = None
 
@@ -295,6 +340,7 @@ def ensure_background_threads() -> None:
             return
         status_worker.start()
         snapshot_watcher.start()
+        event_listener.start()
         _background_pid = os.getpid()
         log(f"Background threads started in process {os.getpid()}", "WARN")
 
@@ -449,6 +495,20 @@ def serve_layout():
                         html.Div(id="loading-indicator", className="loading-indicator", style={"display": "none"}),
                     ], className="surveys-header"),
 
+                    html.Div([
+                        html.Div([
+                            html.Span(id="rp-title", className="refresh-progress__title"),
+                            html.Span(id="rp-elapsed", className="refresh-progress__elapsed"),
+                        ], className="refresh-progress__head"),
+                        html.Div(html.Div(id="rp-fill", className="refresh-progress__fill"), className="refresh-progress__track"),
+                        html.Div([
+                            html.Span("Requested", id="rp-step-1", className="refresh-progress__step"),
+                            html.Span("Fetching", id="rp-step-2", className="refresh-progress__step"),
+                            html.Span("Updated", id="rp-step-3", className="refresh-progress__step"),
+                        ], className="refresh-progress__steps"),
+                        html.Div(id="rp-detail", className="refresh-progress__detail"),
+                    ], id="refresh-progress", className="refresh-progress is-hidden"),
+
                     dcc.Loading(
                         id="surveys-loading",
                         type="default",
@@ -482,9 +542,12 @@ def serve_layout():
         dcc.Store(id="render-trigger", data=0),
         dcc.Store(id="seen-version", data=0),
         dcc.Store(id="notification-data", data={"count": 0}),
+        dcc.Store(id="refresh-data", data={}),
 
         # Polls this process's memory only (no Redis). Dash pauses it in hidden tabs.
         dcc.Interval(id="poll-interval", interval=POLL_INTERVAL_MS, n_intervals=0),
+        # Animates the refresh progress card in the browser; enabled only while it shows.
+        dcc.Interval(id="progress-tick", interval=1000, n_intervals=0, disabled=True),
     ])
 
 
@@ -705,26 +768,54 @@ def display_surveys(page, search_query, _render_trigger, selected_ids):
 
 @callback(
     [Output("render-trigger", "data", allow_duplicate=True),
-     Output("notification-data", "data")],
+     Output("notification-data", "data"),
+     Output("refresh-data", "data")],
     Input("poll-interval", "n_intervals"),
     [State("seen-version", "data"),
      State("current-surveys-data", "data"),
      State("render-trigger", "data"),
-     State("notification-data", "data")],
+     State("notification-data", "data"),
+     State("refresh-data", "data")],
     prevent_initial_call=True
 )
-def poll(_n, seen_version, page_ids, render_trigger, notification_shown):
+def poll(_n, seen_version, page_ids, render_trigger, notification_shown, refresh_shown):
     notification = notifications.get()
     notification_out = notification if notification != notification_shown else dash.no_update
+    refresh_out = _refresh_payload(refresh_shown)
 
     seen_version = seen_version or 0
     if tracker.version == seen_version:
-        return dash.no_update, notification_out
+        return dash.no_update, notification_out, refresh_out
     page_ids = page_ids or []
     needs_render = tracker.page_changed_since(page_ids, seen_version) or (
         not page_ids and tracker.list_version > seen_version
     )
-    return ((render_trigger or 0) + 1 if needs_render else dash.no_update), notification_out
+    return ((render_trigger or 0) + 1 if needs_render else dash.no_update), notification_out, refresh_out
+
+
+def _refresh_payload(shown: Optional[Dict]):
+    """The progress card's data, or no_update if the tab already has it. server_ms
+    lets the browser correct for its own clock."""
+    view = refresh_state.view()
+    if shown and {k: v for k, v in shown.items() if k != "server_ms"} == view:
+        return dash.no_update
+    return dict(view, server_ms=int(time.time() * 1000))
+
+
+clientside_callback(
+    ClientsideFunction(namespace="refreshProgress", function_name="render"),
+    [Output("refresh-progress", "className"),
+     Output("rp-title", "children"),
+     Output("rp-elapsed", "children"),
+     Output("rp-fill", "style"),
+     Output("rp-step-1", "className"),
+     Output("rp-step-2", "className"),
+     Output("rp-step-3", "className"),
+     Output("rp-detail", "children"),
+     Output("progress-tick", "disabled")],
+    [Input("progress-tick", "n_intervals"),
+     Input("refresh-data", "data")],
+)
 
 
 @callback(
@@ -853,21 +944,24 @@ def handle_refresh_single(_clicks, render_trigger):
 
 
 @callback(
-    Output("upload-status", "children", allow_duplicate=True),
+    [Output("upload-status", "children", allow_duplicate=True),
+     Output("refresh-data", "data", allow_duplicate=True)],
     Input("refresh-surveys-btn", "n_clicks"),
+    State("refresh-data", "data"),
     prevent_initial_call=True
 )
-def handle_refresh_surveys(n_clicks):
+def handle_refresh_surveys(n_clicks, refresh_shown):
+    """Queue a refresh; the progress card shows the rest. A click while one is
+    already running just keeps showing that one."""
     if not n_clicks:
-        return dash.no_update
+        return dash.no_update, dash.no_update
     try:
-        requested = ss.request_survey_refresh(redis_client)
+        _, status = ss.request_survey_refresh(redis_client)
     except Exception as e:
         log(f"Survey refresh request failed: {e}", "ERROR")
-        return "Could not request a survey refresh. Please try again."
-    if requested:
-        return "Survey refresh requested. The list updates within a few minutes."
-    return "A survey refresh is already pending."
+        return "Could not request a survey refresh. Please try again.", dash.no_update
+    refresh_state.set_status(status)
+    return "", _refresh_payload(refresh_shown)
 
 
 @callback(
