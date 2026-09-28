@@ -96,6 +96,11 @@ A file lock makes an overlapping run of the same mode skip itself.
 
 ## 6. The website (`app_dash_simple.py`)
 
+- **Background threads** (the snapshot watcher and the status workers) start on
+  the first request in each process, not at import. Render runs gunicorn with
+  the app preloaded, so the import happens in the parent and the serving worker
+  is a fork; threads started at import would stay in the parent. If the list is
+  still empty, a page request or `/health` loads it directly.
 - **Survey list:** `SnapshotWatcher` reads `surveys:meta`, `worker:version` and
   the notification in one MGET every minute in work hours, every 5 minutes
   otherwise, and every 15 seconds for 15 minutes after an upload is queued. It
@@ -195,6 +200,9 @@ browser polling costs nothing.
   writes `UPLOADED` directly, so a stale check can't make a card offer Upload again.
 - Timestamps are timezone-aware UTC (the worker and Render run in different time zones).
 - Culture Index POST requests are no longer retried automatically.
+- After go-live the site stayed on "Waiting for the survey list": Render preloads
+  the app, so threads started at import never ran in the serving worker. Fixed
+  in commits 1561abb and 36197bf (threads start per process on first request).
 - The file cache backend was removed; Redis is required. `KEY_PREFIX` allows
   isolated test runs.
 - Found and fixed during testing: the CSV export needs a longer read timeout
