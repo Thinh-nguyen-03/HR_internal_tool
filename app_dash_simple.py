@@ -173,13 +173,39 @@ class SnapshotWatcher:
         self._last_worker_version = self._UNREAD
         self._last_scan = 0.0
         self._wake = Event()
+        self._tick_lock = Lock()
+        self._thread: Optional[Thread] = None
+        self.last_tick_at: Optional[str] = None
+        self.last_error: Optional[str] = None
 
     def wake(self) -> None:
         """Switch to the fast upload pace now instead of after the current wait."""
         self._wake.set()
 
     def start(self) -> None:
-        Thread(target=self._loop, daemon=True, name="SnapshotWatcher").start()
+        self._thread = Thread(target=self._loop, daemon=True, name="SnapshotWatcher")
+        self._thread.start()
+
+    def is_alive(self) -> bool:
+        return bool(self._thread and self._thread.is_alive())
+
+    def ensure_running(self) -> None:
+        """Restart the watcher thread if it has died."""
+        if not self.is_alive():
+            log("Snapshot watcher was not running; restarting it", "ERROR")
+            self.start()
+
+    def load_now(self) -> None:
+        """Load the snapshot from a page request when the list is still empty, so a
+        stuck or dead watcher thread can never leave the site on "Waiting"."""
+        self.ensure_running()
+        if survey_store.loaded:
+            return
+        try:
+            self.tick()
+        except Exception as e:
+            self.last_error = str(e)[:200]
+            log(f"Snapshot load from a page request failed: {e}", "ERROR")
 
     def _interval(self) -> int:
         if recent_uploads.any_since(15 * 60):
@@ -187,15 +213,24 @@ class SnapshotWatcher:
         return SNAPSHOT_POLL_SECONDS if is_work_hours() else SNAPSHOT_POLL_SECONDS_OFF_HOURS
 
     def _loop(self) -> None:
-        while True:
-            try:
-                self.tick()
-            except Exception as e:
-                log(f"Snapshot watcher error: {e}", "ERROR")
-            self._wake.wait(self._interval())
-            self._wake.clear()
+        try:
+            while True:
+                try:
+                    self.tick()
+                except Exception as e:
+                    self.last_error = str(e)[:200]
+                    log(f"Snapshot watcher error: {e}", "ERROR")
+                self._wake.wait(self._interval())
+                self._wake.clear()
+        finally:
+            log("Snapshot watcher thread stopped", "ERROR")
 
     def tick(self) -> None:
+        with self._tick_lock:
+            self._tick()
+        self.last_tick_at = datetime.now(timezone.utc).isoformat()
+
+    def _tick(self) -> None:
         meta_raw, worker_version, notification_raw = redis_client.mget(
             ss.SNAPSHOT_META_KEY, ss.WORKER_VERSION_KEY, ss.NOTIFICATION_KEY
         )
@@ -249,6 +284,8 @@ auth_manager = AuthManager(server, redis_client=redis_client)
 
 @server.route('/health')
 def health_check():
+    if not survey_store.loaded:
+        snapshot_watcher.load_now()
     redis_ok = status_store.ping()
     status, code = ("ok", 200) if redis_ok and survey_store.loaded else (("degraded", 200) if redis_ok else ("error", 503))
     return jsonify({"status": status, "timestamp": datetime.now(timezone.utc).isoformat()}), code
@@ -263,6 +300,10 @@ def health_check_detailed():
         "surveys_loaded": survey_store.loaded,
         "survey_count": len(survey_store.all()),
         "snapshot": survey_store.meta,
+        "process_id": os.getpid(),
+        "watcher_alive": snapshot_watcher.is_alive(),
+        "watcher_last_tick": snapshot_watcher.last_tick_at,
+        "watcher_last_error": snapshot_watcher.last_error,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     })
 
@@ -586,6 +627,8 @@ def display_surveys(page, search_query, _render_trigger, selected_ids):
     is_valid, page, _ = validate_page_number(page)
     search_query = sanitize_search_query(search_query or "", max_length=100)
 
+    if not survey_store.loaded:
+        snapshot_watcher.load_now()
     if not survey_store.loaded:
         return build_loading_result("Waiting for the survey list from the worker") + (version,)
 
