@@ -146,6 +146,10 @@ handles anything still waiting after 15 s. All handling is idempotent.
   survey that has never been checked.
 - **Uploads** are queued with `shared_state.enqueue_upload` (one job per survey
   at a time). Cards show Queued, Uploading, then the worker's result.
+- **Reload after deploy:** a page loaded before a deploy keeps calling the old
+  Dash callbacks and gets "Callback function not found" errors. Each tab checks
+  `/version` once a minute and reloads when the build changes (a background tab
+  reloads when it is next shown).
 - **Refresh progress card:** "Refresh Surveys" queues a refresh (a click while
   one is running just shows it). The card shows Requested → Fetching → Updated
   with an elapsed timer and a stage-based bar (Culture Index reports no real
@@ -207,6 +211,7 @@ status writes. Browser polling and the progress card cost nothing.
 | `/` | login | The app |
 | `/login`, `/logout` | public | Login page (form submits through a Dash callback), logout |
 | `/health`, `/health/ready`, `/health/live` | public | Probes (no data) |
+| `/version` | public | The deployed build (`RENDER_GIT_COMMIT`, or `APP_BUILD_ID`, or a hash of the code); open tabs check it once a minute and reload after a deploy (`assets/version_check.js`) |
 | `/health/detailed` | login | Redis, snapshot meta, survey count |
 | `/_dash-update-component` | login, except the login callback | Every Dash callback |
 

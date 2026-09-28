@@ -7,6 +7,7 @@ this app reads the list, checks JazzHR status itself, and queues uploads.
 Runs as ONE gunicorn worker: the survey list, change tracker and status queue
 live in process memory.
 """
+import hashlib
 import json
 import os
 import time
@@ -48,6 +49,26 @@ BACKGROUND_SCAN_MINUTES = int(os.getenv('BACKGROUND_SCAN_MINUTES', '10'))
 DIAG_STATUS_CHECK = os.getenv('DIAG_STATUS_CHECK', '0') == '1'
 
 CENTRAL_TZ = ZoneInfo("America/Chicago")
+
+
+def _build_id() -> str:
+    """Identifies the deployed code. Open tabs compare it once a minute
+    (assets/version_check.js) and reload after a deploy, because a page loaded
+    before a deploy keeps calling the old callbacks."""
+    configured = os.getenv('RENDER_GIT_COMMIT') or os.getenv('APP_BUILD_ID')
+    if configured:
+        return configured[:12]
+    here = os.path.dirname(os.path.abspath(__file__))
+    digest = hashlib.sha256()
+    for folder in (here, os.path.join(here, 'assets')):
+        for name in sorted(os.listdir(folder)):
+            if name.endswith(('.py', '.js', '.css')):
+                with open(os.path.join(folder, name), 'rb') as f:
+                    digest.update(f.read())
+    return digest.hexdigest()[:12]
+
+
+BUILD_ID = _build_id()
 WORK_DAYS = range(0, 5)
 WORK_HOURS = range(7, 19)
 
@@ -392,6 +413,13 @@ def liveness_check():
     return jsonify({"alive": True})
 
 
+@server.route('/version')
+def version():
+    response = jsonify({"build": BUILD_ID})
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
 @server.route('/login')
 def login():
     if current_user.is_authenticated:
@@ -407,7 +435,7 @@ def logout():
 
 PUBLIC_PATH_PREFIXES = (
     '/login', '/logout',
-    '/health',
+    '/health', '/version',
     '/assets/', '/_dash-component-suites/',
     '/_dash-layout', '/_dash-dependencies', '/_reload-hash', '/_favicon.ico',
 )
