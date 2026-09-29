@@ -454,23 +454,6 @@ body {
     opacity: 0.9;
 }
 
-/* Status Indicators (for future JazzHR) */
-.status-pending {
-    color: var(--text-tertiary);
-    font-size: 1.5rem;
-    line-height: 1;
-}
-
-.status-uploaded {
-    color: #22c55e;
-    font-size: 1.2rem;
-}
-
-.status-missing {
-    color: #ef4444;
-    font-size: 1.2rem;
-}
-
 /* Survey Info Grid */
 .survey-info {
     display: grid;
@@ -658,9 +641,10 @@ body {
 }
 
 /* Pagination */
+/* Three columns so the navigator stays centred whatever sits on its right */
 .pagination-controls {
-    display: flex;
-    justify-content: space-between;
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
     align-items: center;
     padding: 12px 20px;
     border-top: 1px solid var(--border-color);
@@ -668,11 +652,23 @@ body {
 }
 
 .pagination-center {
+    grid-column: 2;
     display: flex;
     justify-content: center;
     align-items: center;
     gap: 20px;
-    flex: 1;
+}
+
+.pagination-controls .last-updated {
+    grid-column: 3;
+    justify-self: end;
+    margin-left: 0;
+}
+
+.pagination-controls--top {
+    padding: 16px 30px 0;
+    border-top: none;
+    background-color: transparent;
 }
 
 .pagination-btn {
@@ -729,141 +725,68 @@ body {
     background: var(--brand-yellow-hover);
 }
 
-/* ===== JazzHR Status Indicators ===== */
-.status-checking,
+/* JazzHR status: coloured text with a small dot, no background */
 .status-uploaded,
 .status-missing,
 .status-not-found,
 .status-error,
-.status-pending {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 0.85rem;
-    padding: 6px 12px;
-    border-radius: 6px;
-    white-space: nowrap;
-    font-weight: 600;
-    letter-spacing: 0.2px;
-}
-
+.status-pending,
 .status-checking {
-    color: #666;
-    background: #f5f5f5;
-}
-
-.status-spinner {
-    width: 12px;
-    height: 12px;
-    border: 2px solid #f3f3f3;
-    border-top: 2px solid #3498db;
-    border-radius: 50%;
-    animation: spin 1s linear infinite;
-}
-
-@keyframes spin {
-    0% { transform: rotate(0deg); }
-    100% { transform: rotate(360deg); }
-}
-
-.status-uploaded {
-    color: #27ae60;
-    background: #d5f4e6;
-    font-weight: 500;
-}
-
-.status-missing {
-    color: #f39c12;
-    background: #fff3cd;
-    font-weight: 500;
-}
-
-/* Force remove any emojis from status indicators - multiple methods */
-.status-missing,
-.status-uploaded,
-.status-not-found,
-.status-error,
-.status-pending {
-    font-variant-emoji: none;
-    /* Hide warning sign emoji specifically */
-    unicode-bidi: bidi-override;
-}
-
-/* Hide emoji characters using CSS content replacement */
-.status-missing::before,
-.status-uploaded::before,
-.status-not-found::before,
-.status-error::before,
-.status-pending::before {
-    content: none !important;
-    display: none !important;
-}
-
-/* Hide emoji characters in child elements */
-.status-missing *,
-.status-uploaded *,
-.status-not-found *,
-.status-error *,
-.status-pending * {
-    font-variant-emoji: none;
-}
-
-/* Use CSS to filter out emoji unicode ranges */
-.status-missing .status-text,
-.status-uploaded .status-text,
-.status-not-found .status-text,
-.status-error .status-text,
-.status-pending .status-text {
-    /* Filter out warning sign (U+26A0) and other common emojis */
-    font-feature-settings: "liga" off;
-    text-rendering: optimizeLegibility;
-}
-
-
-.status-not-found {
-    color: #95a5a6;
-    background: #f8f9fa;
-}
-
-.status-error {
-    color: #e74c3c;
-    background: #fadbd8;
-}
-
-.status-pending {
-    color: #bdc3c7;
-    background: #f8f9fa;
-}
-
-.status-icon {
-    font-size: 1rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    white-space: nowrap;
+    font-size: 13px;
+    font-weight: 600;
     line-height: 1;
 }
 
-.status-icon-success {
-    color: #27ae60;
+.status-uploaded::before,
+.status-missing::before,
+.status-not-found::before,
+.status-error::before,
+.status-pending::before,
+.status-checking::before {
+    content: "";
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: currentColor;
+    flex: 0 0 auto;
 }
 
-.status-icon-warning {
-    color: #f39c12;
+.status-uploaded {
+    color: #4ade80;
 }
 
-/* Hide status-icon divs in all status indicators*/
-.status-missing .status-icon,
-.status-uploaded .status-icon,
-.status-not-found .status-icon,
-.status-error .status-icon,
-.status-pending .status-icon {
-    display: none !important;
-    visibility: hidden !important;
+.status-missing {
+    color: var(--brand-yellow);
 }
 
-.status-icon-error {
-    color: #e74c3c;
+.status-not-found {
+    color: #fb923c;
+}
+
+.status-error {
+    color: #f87171;
+}
+
+.status-pending,
+.status-checking {
+    color: #e2e8f0;
+}
+
+.status-checking::before {
+    animation: statusPulse 1.4s ease-in-out infinite;
+}
+
+@keyframes statusPulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
 }
 
 .status-text {
-    font-size: 0.85rem;
+    font-size: 13px;
     line-height: 1;
 }
 

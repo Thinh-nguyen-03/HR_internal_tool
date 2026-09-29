@@ -78,7 +78,8 @@ def is_work_hours() -> bool:
     return now.weekday() in WORK_DAYS and now.hour in WORK_HOURS
 
 
-def to_central(value: Optional[str]) -> Optional[str]:
+def friendly_time(value: Optional[str]) -> Optional[str]:
+    """ "9:30 AM" today, "Sep 28, 9:30 AM" on other days (Central time)."""
     if not value:
         return None
     try:
@@ -87,7 +88,11 @@ def to_central(value: Optional[str]) -> Optional[str]:
         return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(CENTRAL_TZ).strftime("%b %d %I:%M %p")
+    local = parsed.astimezone(CENTRAL_TZ)
+    clock = local.strftime("%I:%M %p").lstrip("0")
+    if local.date() == datetime.now(CENTRAL_TZ).date():
+        return clock
+    return f"{local.strftime('%b')} {local.day}, {clock}"
 
 
 class SurveyStore:
@@ -541,6 +546,14 @@ def serve_layout():
                         html.Div(html.Div(id="jp-fill", className="refresh-progress__fill"), className="refresh-progress__track"),
                     ], id="jazzhr-progress", className="refresh-progress is-hidden"),
 
+                    html.Div([
+                        html.Div([
+                            html.Button("<- Previous", id="prev-page-btn-top", className="pagination-btn", n_clicks=0),
+                            html.Div(id="page-info-top", className="page-info"),
+                            html.Button("Next ->", id="next-page-btn-top", className="pagination-btn", n_clicks=0),
+                        ], className="pagination-center"),
+                    ], className="pagination-controls pagination-controls--top"),
+
                     dcc.Loading(
                         id="surveys-loading",
                         type="default",
@@ -591,7 +604,7 @@ app.layout = serve_layout
 
 def _status_indicator(entry: Optional[Dict]) -> html.Div:
     if not entry:
-        text, class_name = "Checking", "status-pending"
+        text, class_name = "Checking", "status-checking"
     else:
         status = entry.get('status')
         text, class_name = {
@@ -739,14 +752,23 @@ def _triggered_index() -> Optional[str]:
      Output("current-surveys-data", "data"),
      Output("uploadable-ids", "data"),
      Output("loading-indicator", "style"),
-     Output("seen-version", "data")],
+     Output("seen-version", "data"),
+     Output("page-info-top", "children"),
+     Output("prev-page-btn-top", "disabled"),
+     Output("next-page-btn-top", "disabled")],
     [Input("current-page", "data"),
      Input("search-query", "data"),
      Input("render-trigger", "data")],
     State("selected-ids", "data"),
     prevent_initial_call=False
 )
-def display_surveys(page, search_query, _render_trigger, selected_ids):
+def display_surveys(page, search_query, render_trigger, selected_ids):
+    result = _render_surveys(page, search_query, selected_ids)
+    # The top navigator mirrors the bottom one: page info, previous/next disabled.
+    return result + (result[1], result[2], result[3])
+
+
+def _render_surveys(page, search_query, selected_ids):
     # Read the version before the data: any change after this point makes the
     # next poll re-render again, so nothing is missed.
     version = tracker.version
@@ -793,9 +815,8 @@ def display_surveys(page, search_query, _render_trigger, selected_ids):
         page_info = f"Page {page} of {total_pages} ({total_count:,} surveys)"
 
     meta = survey_store.meta
-    updated = f"Survey list from {to_central(meta.get('changed_at')) or 'unknown'}"
-    if meta.get('checked_at'):
-        updated += f", last checked {to_central(meta['checked_at'])}"
+    checked = friendly_time(meta.get('checked_at') or meta.get('changed_at'))
+    updated = f"Last checked {checked}" if checked else ""
 
     return (cards, page_info, page <= 1, page >= total_pages, updated,
             survey_ids, uploadable_ids, {"display": "none"}, version)
@@ -900,14 +921,17 @@ def handle_login_callback(n_clicks, username_submit, password_submit, username, 
 @callback(
     Output("current-page", "data"),
     [Input("prev-page-btn", "n_clicks"),
-     Input("next-page-btn", "n_clicks")],
+     Input("next-page-btn", "n_clicks"),
+     Input("prev-page-btn-top", "n_clicks"),
+     Input("next-page-btn-top", "n_clicks")],
     State("current-page", "data"),
     prevent_initial_call=True
 )
-def handle_pagination(prev_clicks, next_clicks, current_page):
-    if ctx.triggered_id == "prev-page-btn":
+def handle_pagination(*args):
+    current_page = args[-1]
+    if ctx.triggered_id in ("prev-page-btn", "prev-page-btn-top"):
         return max(1, (current_page or 1) - 1)
-    if ctx.triggered_id == "next-page-btn":
+    if ctx.triggered_id in ("next-page-btn", "next-page-btn-top"):
         return (current_page or 1) + 1
     return dash.no_update
 
@@ -936,7 +960,7 @@ def show_notification_banner(notification):
     count = int((notification or {}).get("count") or 0)
     if count <= 0:
         return [html.Span("New Surveys: ", className="badge-label"), html.Span("0", className="badge-count")], "surveys-badge no-new-surveys"
-    time_str = to_central(notification.get("timestamp")) or "recently"
+    time_str = friendly_time(notification.get("timestamp")) or "recently"
     return [
         html.Span("New Surveys: ", className="badge-label"),
         html.Span(str(count), className="badge-count pulse"),
