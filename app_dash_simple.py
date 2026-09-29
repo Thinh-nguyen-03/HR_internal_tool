@@ -531,12 +531,6 @@ def serve_layout():
                             html.Span(id="rp-elapsed", className="refresh-progress__elapsed"),
                         ], className="refresh-progress__head"),
                         html.Div(html.Div(id="rp-fill", className="refresh-progress__fill"), className="refresh-progress__track"),
-                        html.Div([
-                            html.Span("Requested", id="rp-step-1", className="refresh-progress__step"),
-                            html.Span("Fetching", id="rp-step-2", className="refresh-progress__step"),
-                            html.Span("Updated", id="rp-step-3", className="refresh-progress__step"),
-                        ], className="refresh-progress__steps"),
-                        html.Div(id="rp-detail", className="refresh-progress__detail"),
                     ], id="refresh-progress", className="refresh-progress is-hidden"),
 
                     dcc.Loading(
@@ -838,10 +832,6 @@ clientside_callback(
      Output("rp-title", "children"),
      Output("rp-elapsed", "children"),
      Output("rp-fill", "style"),
-     Output("rp-step-1", "className"),
-     Output("rp-step-2", "className"),
-     Output("rp-step-3", "className"),
-     Output("rp-detail", "children"),
      Output("progress-tick", "disabled")],
     [Input("progress-tick", "n_intervals"),
      Input("refresh-data", "data")],
