@@ -1257,8 +1257,8 @@ body {
 
 /* Survey refresh progress: one line and a bar */
 .refresh-progress {
-    margin: 14px 30px 0;
-    padding: 10px 16px 12px;
+    margin: 16px 30px 0;
+    padding: 18px 22px 20px;
     background: var(--brand-navy-lighter);
     border: 1px solid rgba(249, 168, 37, 0.22);
     border-radius: var(--radius-lg);
@@ -1283,24 +1283,24 @@ body {
     justify-content: space-between;
     align-items: baseline;
     gap: 16px;
-    margin-bottom: 8px;
+    margin-bottom: 14px;
 }
 
 .refresh-progress__title {
-    font-size: 13px;
+    font-size: 14px;
     font-weight: 600;
     color: var(--text-primary);
 }
 
 .refresh-progress__elapsed {
-    font-size: 12px;
+    font-size: 13px;
     font-variant-numeric: tabular-nums;
     color: var(--text-secondary);
 }
 
 .refresh-progress__track {
     position: relative;
-    height: 4px;
+    height: 8px;
     background: rgba(255, 255, 255, 0.08);
     border-radius: 999px;
     overflow: hidden;

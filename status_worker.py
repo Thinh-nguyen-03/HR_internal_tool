@@ -13,6 +13,8 @@ Now:
 """
 import heapq
 import itertools
+import os
+import time
 from datetime import datetime, timezone
 from threading import Condition, Thread
 from typing import Callable, Dict, List, Optional, Set
@@ -63,6 +65,7 @@ class StatusWorker:
         self._surveys: Dict[str, Dict] = {}     # survey_id -> survey dict to check
         self._in_flight: Set[str] = set()
         self._errors: Dict[str, str] = {}       # survey_id -> last check error (not cached in Redis)
+        self._batches: Dict[str, Dict] = {}     # batch_id -> progress of a "Refresh JazzHR" click
 
     def start(self) -> None:
         """Start the worker threads in the calling process with a fresh queue.
@@ -110,6 +113,38 @@ class StatusWorker:
             self.tracker.mark_changed(changed)   # show the "Checking" marker on those cards
         return added
 
+    BATCH_KEEP_SECONDS = 600
+
+    def start_batch(self, survey_ids: List[str]) -> str:
+        """Track a group of checks (one "Refresh JazzHR" click). Call before enqueueing;
+        each survey counts once its next check finishes, whoever queued it."""
+        batch_id = os.urandom(4).hex()
+        now = time.time()
+        with self._cond:
+            self._batches = {bid: b for bid, b in self._batches.items() if now - b["started"] < self.BATCH_KEEP_SECONDS}
+            self._batches[batch_id] = {"ids": set(map(str, survey_ids)), "done": set(), "failed": set(),
+                                       "started": now, "finished": None}
+        return batch_id
+
+    def batch_progress(self, batch_id: Optional[str]) -> Optional[Dict]:
+        with self._cond:
+            batch = self._batches.get(batch_id or "")
+            if not batch:
+                return None
+            return {"id": batch_id, "total": len(batch["ids"]), "done": len(batch["done"]),
+                    "failed": len(batch["failed"]),
+                    "finished_ms": int(batch["finished"] * 1000) if batch["finished"] else None}
+
+    def _record_batch_result(self, sid: str, failed: bool) -> None:
+        with self._cond:
+            for batch in self._batches.values():
+                if sid in batch["ids"] and sid not in batch["done"]:
+                    batch["done"].add(sid)
+                    if failed:
+                        batch["failed"].add(sid)
+                    if len(batch["done"]) == len(batch["ids"]):
+                        batch["finished"] = time.time()
+
     def is_busy(self, survey_id: str) -> bool:
         """Queued at foreground priority or being checked right now."""
         sid = str(survey_id)
@@ -137,13 +172,17 @@ class StatusWorker:
         while True:
             sid = self._next(background)
             survey = self._surveys.pop(sid, None) or {}
+            failed = False
             try:
                 self._check(checker, sid, survey, background)
+                failed = sid in self._errors
             except Exception as e:
+                failed = True
                 log(f"Status worker error for {sid}: {e}", "ERROR")
             finally:
                 with self._cond:
                     self._in_flight.discard(sid)
+                self._record_batch_result(sid, failed)
                 self.tracker.mark_changed([sid])
 
     def _check(self, checker: JazzHRUploadChecker, sid: str, survey: Dict, background: bool) -> None:

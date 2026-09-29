@@ -533,6 +533,14 @@ def serve_layout():
                         html.Div(html.Div(id="rp-fill", className="refresh-progress__fill"), className="refresh-progress__track"),
                     ], id="refresh-progress", className="refresh-progress is-hidden"),
 
+                    html.Div([
+                        html.Div([
+                            html.Span(id="jp-title", className="refresh-progress__title"),
+                            html.Span(id="jp-count", className="refresh-progress__elapsed"),
+                        ], className="refresh-progress__head"),
+                        html.Div(html.Div(id="jp-fill", className="refresh-progress__fill"), className="refresh-progress__track"),
+                    ], id="jazzhr-progress", className="refresh-progress is-hidden"),
+
                     dcc.Loading(
                         id="surveys-loading",
                         type="default",
@@ -567,11 +575,14 @@ def serve_layout():
         dcc.Store(id="seen-version", data=0),
         dcc.Store(id="notification-data", data={"count": 0}),
         dcc.Store(id="refresh-data", data={}),
+        dcc.Store(id="jazzhr-batch", data=None),
+        dcc.Store(id="jazzhr-progress-data", data={}),
 
         # Polls this process's memory only (no Redis). Dash pauses it in hidden tabs.
         dcc.Interval(id="poll-interval", interval=POLL_INTERVAL_MS, n_intervals=0),
         # Animates the refresh progress card in the browser; enabled only while it shows.
         dcc.Interval(id="progress-tick", interval=1000, n_intervals=0, disabled=True),
+        dcc.Interval(id="jazzhr-progress-tick", interval=1000, n_intervals=0, disabled=True),
     ])
 
 
@@ -793,28 +804,42 @@ def display_surveys(page, search_query, _render_trigger, selected_ids):
 @callback(
     [Output("render-trigger", "data", allow_duplicate=True),
      Output("notification-data", "data"),
-     Output("refresh-data", "data")],
+     Output("refresh-data", "data"),
+     Output("jazzhr-progress-data", "data")],
     Input("poll-interval", "n_intervals"),
     [State("seen-version", "data"),
      State("current-surveys-data", "data"),
      State("render-trigger", "data"),
      State("notification-data", "data"),
-     State("refresh-data", "data")],
+     State("refresh-data", "data"),
+     State("jazzhr-batch", "data"),
+     State("jazzhr-progress-data", "data")],
     prevent_initial_call=True
 )
-def poll(_n, seen_version, page_ids, render_trigger, notification_shown, refresh_shown):
+def poll(_n, seen_version, page_ids, render_trigger, notification_shown, refresh_shown, jazzhr_batch, jazzhr_shown):
     notification = notifications.get()
     notification_out = notification if notification != notification_shown else dash.no_update
     refresh_out = _refresh_payload(refresh_shown)
+    jazzhr_out = _jazzhr_payload(jazzhr_batch, jazzhr_shown)
 
     seen_version = seen_version or 0
     if tracker.version == seen_version:
-        return dash.no_update, notification_out, refresh_out
+        return dash.no_update, notification_out, refresh_out, jazzhr_out
     page_ids = page_ids or []
     needs_render = tracker.page_changed_since(page_ids, seen_version) or (
         not page_ids and tracker.list_version > seen_version
     )
-    return ((render_trigger or 0) + 1 if needs_render else dash.no_update), notification_out, refresh_out
+    return ((render_trigger or 0) + 1 if needs_render else dash.no_update), notification_out, refresh_out, jazzhr_out
+
+
+def _jazzhr_payload(batch_id: Optional[str], shown: Optional[Dict]):
+    """Progress of this tab's last "Refresh JazzHR" click, or no_update if unchanged."""
+    progress = status_worker.batch_progress(batch_id)
+    if not progress:
+        return dash.no_update if not shown else {}
+    if shown and {k: v for k, v in shown.items() if k != "server_ms"} == progress:
+        return dash.no_update
+    return dict(progress, server_ms=int(time.time() * 1000))
 
 
 def _refresh_payload(shown: Optional[Dict]):
@@ -824,6 +849,18 @@ def _refresh_payload(shown: Optional[Dict]):
     if shown and {k: v for k, v in shown.items() if k != "server_ms"} == view:
         return dash.no_update
     return dict(view, server_ms=int(time.time() * 1000))
+
+
+clientside_callback(
+    ClientsideFunction(namespace="refreshProgress", function_name="renderJazzhr"),
+    [Output("jazzhr-progress", "className"),
+     Output("jp-title", "children"),
+     Output("jp-count", "children"),
+     Output("jp-fill", "style"),
+     Output("jazzhr-progress-tick", "disabled")],
+    [Input("jazzhr-progress-tick", "n_intervals"),
+     Input("jazzhr-progress-data", "data")],
+)
 
 
 clientside_callback(
@@ -933,19 +970,24 @@ def handle_banner_click(n_clicks, notification, render_trigger):
 
 @callback(
     [Output("render-trigger", "data", allow_duplicate=True),
-     Output("upload-status", "children", allow_duplicate=True)],
+     Output("jazzhr-batch", "data"),
+     Output("jazzhr-progress-data", "data", allow_duplicate=True)],
     Input("refresh-jazzhr-btn", "n_clicks"),
     [State("current-surveys-data", "data"),
      State("render-trigger", "data")],
     prevent_initial_call=True
 )
 def handle_refresh_jazzhr(n_clicks, page_ids, render_trigger):
+    """Re-check every survey on this page; the JazzHR progress bar follows the batch."""
     if not n_clicks:
-        return dash.no_update, dash.no_update
+        return dash.no_update, dash.no_update, dash.no_update
     surveys = [s for s in (survey_store.get(sid) for sid in (page_ids or [])) if s]
+    if not surveys:
+        return dash.no_update, dash.no_update, dash.no_update
+    batch_id = status_worker.start_batch([s['surveyId'] for s in surveys])
     queued = status_worker.enqueue(surveys, PRIORITY_INTERACTIVE)
     log(f"Refresh JazzHR: {queued} of {len(surveys)} surveys queued", "WARN")
-    return (render_trigger or 0) + 1, f"Checking {len(surveys)} surveys"
+    return (render_trigger or 0) + 1, batch_id, _jazzhr_payload(batch_id, None)
 
 
 @callback(

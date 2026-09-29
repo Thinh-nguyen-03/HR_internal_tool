@@ -151,13 +151,16 @@ handles anything still waiting after 15 s. All handling is idempotent.
   `/version` once a minute and reloads when the build changes (a background tab
   reloads when it is next shown).
 - **Refresh progress:** "Refresh Surveys" queues a refresh (a click while one is
-  running just shows it). A single line and a bar show "Waiting for the worker…",
-  "Fetching surveys…" with a timer (or "Culture Index timed out, retrying…"),
-  then "Updated: N new surveys" or "Refresh failed: …", and "Worker isn't
-  responding" if the worker's heartbeat is older than 11 minutes. The bar is
-  stage-based (Culture Index reports no real progress) and animated in the
-  browser (`assets/refresh_progress.js`); it hides 8 s after success or 30 s
+  running just shows it). A single line and a bar show "Waiting for the worker",
+  "Fetching surveys" with a timer (or "Culture Index timed out, retrying"), then
+  "Updated: N new surveys" or "Refresh failed: …", and "Worker isn't responding"
+  if the worker's heartbeat is older than 11 minutes. The bar is stage-based
+  (Culture Index reports no real progress); it hides 8 s after success or 30 s
   after a failure.
+- **JazzHR progress:** "Refresh JazzHR" starts a batch in `StatusWorker`; the
+  clicking tab shows "Checking JazzHR" with "N of 15" and a bar that fills as
+  checks finish, then "JazzHR statuses updated" (or "Checked 15, 2 failed").
+  Both bars are rendered in the browser (`assets/refresh_progress.js`).
 
 ## 7. Report match rules (`check_pdf_match`)
 

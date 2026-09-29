@@ -6,6 +6,35 @@
  */
 window.dash_clientside = Object.assign({}, window.dash_clientside, {
     refreshProgress: {
+        /* "Refresh JazzHR": real progress, since the site runs these checks itself. */
+        renderJazzhr: function (_tick, data) {
+            var HIDE_MS = 6000;
+            var hidden = ["refresh-progress is-hidden", "", "", {width: "0%"}, true];
+            if (!data || !data.total) {
+                return hidden;
+            }
+            var state = window.__jazzhrProgress || (window.__jazzhrProgress = {});
+            if (data.server_ms && state.serverMs !== data.server_ms) {
+                state.serverMs = data.server_ms;
+                state.offset = Date.now() - data.server_ms;
+            }
+            var now = Date.now() - (state.offset || 0);
+            var count = data.done + " of " + data.total;
+            var width = Math.max(3, 100 * data.done / data.total).toFixed(1) + "%";
+
+            if (!data.finished_ms) {
+                return ["refresh-progress refresh-progress--running", "Checking JazzHR", count, {width: width}, false];
+            }
+            if (now - data.finished_ms > HIDE_MS) {
+                return hidden;
+            }
+            if (data.failed > 0) {
+                return ["refresh-progress refresh-progress--failed",
+                        "Checked " + data.total + ", " + data.failed + " failed", count, {width: "100%"}, false];
+            }
+            return ["refresh-progress refresh-progress--done", "JazzHR statuses updated", count, {width: "100%"}, false];
+        },
+
         render: function (_tick, data) {
             var HIDE_DONE_MS = 8000;
             var HIDE_FAILED_MS = 30000;
@@ -56,7 +85,7 @@ window.dash_clientside = Object.assign({}, window.dash_clientside, {
                 }
                 var workerStale = !data.heartbeat_ms || now - data.heartbeat_ms > WORKER_STALE_MS;
                 variant = sinceRequest > 20000 && workerStale ? "warning" : "requested";
-                title = variant === "warning" ? "Worker isn't responding" : "Waiting for the worker…";
+                title = variant === "warning" ? "Worker isn't responding" : "Waiting for the worker";
                 width = ease(sinceRequest, 3, 14, 4000);
             } else if (data.state === "running") {
                 if (sinceRequest > ABANDONED_MS) {
@@ -64,7 +93,7 @@ window.dash_clientside = Object.assign({}, window.dash_clientside, {
                 }
                 var sinceStart = now - (data.started_ms || data.requested_ms);
                 variant = "running";
-                title = data.attempt > 1 ? "Culture Index timed out, retrying…" : "Fetching surveys…";
+                title = data.attempt > 1 ? "Culture Index timed out, retrying" : "Fetching surveys";
                 elapsed = clock(sinceRequest);
                 width = ease(sinceStart, 16, 92, 22000);
             } else if (data.state === "done") {
