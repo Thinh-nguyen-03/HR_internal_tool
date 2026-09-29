@@ -1207,8 +1207,9 @@ body {
 
 .refresh-progress__elapsed {
     font-size: 13px;
+    font-weight: 600;
     font-variant-numeric: tabular-nums;
-    color: var(--text-secondary);
+    color: var(--text-primary);
 }
 
 .refresh-progress__track {

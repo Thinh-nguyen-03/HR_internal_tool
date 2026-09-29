@@ -30,9 +30,9 @@ window.dash_clientside = Object.assign({}, window.dash_clientside, {
             }
             if (data.failed > 0) {
                 return ["refresh-progress refresh-progress--failed",
-                        "Checked " + data.total + ", " + data.failed + " failed", count, {width: "100%"}, false];
+                        "Checked " + data.total + ", " + data.failed + " Failed", count, {width: "100%"}, false];
             }
-            return ["refresh-progress refresh-progress--done", "JazzHR statuses updated", count, {width: "100%"}, false];
+            return ["refresh-progress refresh-progress--done", "JazzHR Statuses Updated", count, {width: "100%"}, false];
         },
 
         render: function (_tick, data) {
@@ -65,15 +65,15 @@ window.dash_clientside = Object.assign({}, window.dash_clientside, {
             function shortError(error) {
                 var e = (error || "").toLowerCase();
                 if (e.indexOf("504") >= 0 || e.indexOf("timed out") >= 0 || e.indexOf("timeout") >= 0) {
-                    return "Culture Index timed out";
+                    return "Culture Index Timed Out";
                 }
                 if (e.indexOf("403") >= 0) {
-                    return "Culture Index refused the request";
+                    return "Culture Index Refused the Request";
                 }
                 if (e.indexOf("already running") >= 0) {
-                    return "another refresh is running";
+                    return "Another Refresh Is Running";
                 }
-                return "something went wrong";
+                return "Something Went Wrong";
             }
 
             var sinceRequest = now - data.requested_ms;
@@ -85,7 +85,7 @@ window.dash_clientside = Object.assign({}, window.dash_clientside, {
                 }
                 var workerStale = !data.heartbeat_ms || now - data.heartbeat_ms > WORKER_STALE_MS;
                 variant = sinceRequest > 20000 && workerStale ? "warning" : "requested";
-                title = variant === "warning" ? "Worker isn't responding" : "Waiting for the worker";
+                title = variant === "warning" ? "Worker Isn't Responding" : "Waiting for the Worker";
                 width = ease(sinceRequest, 3, 14, 4000);
             } else if (data.state === "running") {
                 if (sinceRequest > ABANDONED_MS) {
@@ -93,7 +93,7 @@ window.dash_clientside = Object.assign({}, window.dash_clientside, {
                 }
                 var sinceStart = now - (data.started_ms || data.requested_ms);
                 variant = "running";
-                title = data.attempt > 1 ? "Culture Index timed out, retrying" : "Fetching surveys";
+                title = data.attempt > 1 ? "Culture Index Timed Out, Retrying" : "Fetching Surveys";
                 elapsed = clock(sinceRequest);
                 width = ease(sinceStart, 16, 92, 22000);
             } else if (data.state === "done") {
@@ -102,14 +102,14 @@ window.dash_clientside = Object.assign({}, window.dash_clientside, {
                 }
                 var n = data.new_count || 0;
                 variant = "done";
-                title = n > 0 ? "Updated: " + n + " new survey" + (n === 1 ? "" : "s") : "Updated: no new surveys";
+                title = n > 0 ? "Updated: " + n + " New Survey" + (n === 1 ? "" : "s") : "Updated: No New Surveys";
                 width = 100;
             } else if (data.state === "failed") {
                 if (now - (data.finished_ms || now) > HIDE_FAILED_MS) {
                     return hidden;
                 }
                 variant = "failed";
-                title = "Refresh failed: " + shortError(data.error);
+                title = "Refresh Failed: " + shortError(data.error);
                 width = 100;
             } else {
                 return hidden;

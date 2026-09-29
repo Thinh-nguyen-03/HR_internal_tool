@@ -34,7 +34,7 @@ from status_worker import StatusWorker, PRIORITY_BACKGROUND, PRIORITY_INTERACTIV
 from survey_display import build_loading_result, build_error_result, build_empty_result, format_time_ago  # noqa: E402
 from ui_state import ChangeTracker, NotificationState, RefreshState, log  # noqa: E402
 
-ITEMS_PER_PAGE = int(os.getenv('ITEMS_PER_PAGE', '15'))
+ITEMS_PER_PAGE = int(os.getenv('ITEMS_PER_PAGE', '14'))
 MAX_BATCH_UPLOAD = int(os.getenv('MAX_BATCH_UPLOAD', '15'))
 MAX_BACKGROUND_CHECK = int(os.getenv('MAX_BACKGROUND_CHECK', '50'))
 RECENT_SURVEY_THRESHOLD = int(os.getenv('RECENT_SURVEY_THRESHOLD', '1000'))
@@ -632,15 +632,15 @@ def _card_action(job: Optional[Dict], busy: bool, last_error: Optional[str]) -> 
 
     state = (job or {}).get('state')
     if state == ss.JOB_QUEUED:
-        return parts("queued", "Queued for upload")
+        return parts("queued", "Queued for Upload")
     if state == ss.JOB_UPLOADING:
         return parts("uploading", "Uploading")
     if state == ss.JOB_FAILED:
-        return parts("error", "Upload failed", job.get('error'))
+        return parts("error", "Upload Failed", job.get('error'))
     if busy:
         return parts("refreshing", "Checking JazzHR")
     if last_error:
-        return parts("error", "Last check failed", last_error)
+        return parts("error", "Last Check Failed", last_error)
     return "card-action-status", []
 
 

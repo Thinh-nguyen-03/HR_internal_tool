@@ -35,7 +35,7 @@ pip install -r requirements.txt
 | `REDIS_URL` | required | Shared state |
 | `KEY_PREFIX` | empty | Prefix for every Redis key; use e.g. `test:` to keep a test run off production data |
 | `SESSION_COOKIE_SECURE` | `True` | Set `False` only for plain-http local runs |
-| `ITEMS_PER_PAGE` | 15 | Surveys per page |
+| `ITEMS_PER_PAGE` | 14 | Surveys per page |
 | `MAX_BATCH_UPLOAD` | 15 | Most surveys in one "Upload Selected" |
 | `MAX_BACKGROUND_CHECK` | 50 | How many of the newest surveys are kept fresh in the background |
 | `RECENT_SURVEY_THRESHOLD` | 1000 | Newest surveys whose status goes stale; older ones never do on their own |
