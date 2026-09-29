@@ -635,8 +635,6 @@ def _card_action(job: Optional[Dict], busy: bool, last_error: Optional[str]) -> 
         return parts("queued", "Queued for upload")
     if state == ss.JOB_UPLOADING:
         return parts("uploading", "Uploading")
-    if state == ss.JOB_DONE:
-        return parts("success", job.get('message') or "Uploaded")
     if state == ss.JOB_FAILED:
         return parts("error", "Upload failed", job.get('error'))
     if busy:
@@ -644,6 +642,21 @@ def _card_action(job: Optional[Dict], busy: bool, last_error: Optional[str]) -> 
     if last_error:
         return parts("error", "Last check failed", last_error)
     return "card-action-status", []
+
+
+def _footer_time(entry: Optional[Dict], job: Optional[Dict]) -> str:
+    """ "Uploaded 3 minutes ago" right after an upload from this tool, otherwise
+    when JazzHR was last checked. The status already says Uploaded, so a finished
+    upload needs no separate message."""
+    def ago(value):
+        text = format_time_ago(value)
+        return text[0].lower() + text[1:] if text else text
+
+    if job and job.get('state') == ss.JOB_DONE and str(job.get('message', '')).startswith('Uploaded'):
+        return f"Uploaded {ago(job.get('updated_at'))}"
+    if entry and entry.get('timestamp'):
+        return f"Checked {ago(entry['timestamp'])}"
+    return "Never checked"
 
 
 def build_card(survey: Dict, entry: Optional[Dict], job: Optional[Dict], busy: bool,
@@ -688,10 +701,7 @@ def build_card(survey: Dict, entry: Optional[Dict], job: Optional[Dict], busy: b
         ], className="survey-info"),
 
         html.Div([
-            html.Span(
-                format_time_ago(entry.get('timestamp')) if entry and entry.get('timestamp') else "Never checked",
-                className="last-checked-value"
-            ),
+            html.Span(_footer_time(entry, job), className="last-checked-value"),
             html.Div(action_children, className=action_class),
             html.Button(
                 "Refresh Status",
@@ -700,6 +710,8 @@ def build_card(survey: Dict, entry: Optional[Dict], job: Optional[Dict], busy: b
                 className="refresh-single-btn",
                 title="Check JazzHR status for this profile"
             ),
+            html.Button("Upload", id={"type": "upload-single-btn", "index": survey_id}, n_clicks=0,
+                        className="upload-single-btn") if is_uploadable else None,
         ], className="survey-footer"),
     ]
 
@@ -710,9 +722,6 @@ def build_card(survey: Dict, entry: Optional[Dict], job: Optional[Dict], busy: b
                           value=[survey_id] if selected else [],
                           className="survey-checkbox-overlay")
         ], className="survey-checkbox-overlay-container"))
-        card_children.append(html.Div([
-            html.Button("Upload", id={"type": "upload-single-btn", "index": survey_id}, n_clicks=0, className="upload-single-btn")
-        ], className="survey-upload-container"))
 
     return html.Div(card_children, className="survey-item"), is_uploadable
 
